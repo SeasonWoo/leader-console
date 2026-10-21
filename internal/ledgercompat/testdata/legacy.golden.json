@@ -1,0 +1,98 @@
+{
+  "tasks": [
+    {
+      "id": "cloud-compat",
+      "name": "cloud-compat",
+      "kind": "claude",
+      "agent_name": "cloud-compat",
+      "pane_id": "w1:pB",
+      "branch": "无（只读，master）",
+      "goal": "排查云端兼容性",
+      "status": "done",
+      "result_summary": "/tmp/cloud-compat.md：CLI 无 kube 依赖",
+      "reports": [
+        "/tmp/cloud-compat.md"
+      ],
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-20T22:45:00+08:00",
+      "notified_at": "2026-10-20T22:45:00+08:00"
+    },
+    {
+      "id": "sec-scrub",
+      "name": "sec-scrub",
+      "kind": "codex",
+      "agent_name": "sec-scrub",
+      "pane_id": "wH:p1",
+      "worktree": "\u003chome\u003e/.herdr/worktrees/x/fix-secrets",
+      "goal": "删除明文凭证",
+      "status": "failed",
+      "result_summary": "429 限流，改派给 sec-scrub-c",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-20T23:15:00+08:00"
+    },
+    {
+      "id": "bits-qa",
+      "name": "bits-qa",
+      "kind": "codex",
+      "agent_name": "bits-qa",
+      "pane_id": "wP:p1",
+      "branch": "fix-bits-qa",
+      "goal": "QA 默认不填",
+      "status": "done",
+      "result_summary": "/tmp/bits-qa.md：只改了 SKILL.md；等用户确认提交",
+      "reports": [
+        "/tmp/bits-qa.md"
+      ],
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-20T23:15:00+08:00"
+    },
+    {
+      "id": "devx-fix",
+      "name": "devx-fix",
+      "kind": "codex",
+      "agent_name": "devx-fix",
+      "branch": "fix-devx",
+      "goal": "适配 0.1.57",
+      "status": "failed",
+      "result_summary": "Codex 卡住，改派 devx-fix-c",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-21T12:25:00+08:00"
+    },
+    {
+      "id": "panic-fix",
+      "name": "panic-fix",
+      "kind": "codex",
+      "agent_name": "panic-fix",
+      "pane_id": "wR:p1",
+      "branch": "fix-panic",
+      "goal": "修复 panic",
+      "status": "lost",
+      "result_summary": "herdr 重启后会话没有恢复",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-21T11:55:00+08:00"
+    },
+    {
+      "id": "lc-arch",
+      "name": "lc-arch",
+      "kind": "claude",
+      "agent_name": "lc-arch",
+      "pane_id": "w1:pW",
+      "worktree": "/Users/me/leader-console",
+      "goal": "技术方案",
+      "status": "working",
+      "result_summary": "/tmp/lc-arch.md",
+      "reports": [
+        "/tmp/lc-arch.md"
+      ],
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-21T15:55:00+08:00"
+    }
+  ],
+  "hints": [
+    {
+      "task_id": "bits-qa",
+      "text": "/tmp/bits-qa.md：只改了 SKILL.md；等用户确认提交"
+    }
+  ],
+  "warnings": null
+}
