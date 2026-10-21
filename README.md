@@ -49,8 +49,8 @@ curl -s http://127.0.0.1:7788/api/v1/overview   # 项目、leader 在线状态�
 - **决策回传**：作答后后台通过 `herdr agent prompt <leader> "【决策回传】…"` 投递给该项目的 leader，投递结果也记在 `answers.jsonl`。leader 离线时回答排队，上线后自动投递；连续失败 5 次标记失败，可在页面上“重试投递”。leader 写入 `decision_ack` / `decision_executing` / `decision_done` 事件后，页面进度条随之推进。
 - **安全**：只接受回环地址和 `Host` 为 127.0.0.1 / localhost / [::1] 的请求；写接口需要进程启动时随机生成的 token（只注入首页 `<meta name="lc-token">`，不打印到日志），并校验 `Origin`。所有展示文本先脱敏，Markdown 渲染为白名单 HTML。
 - **单实例**：同一用户只能运行一个实例，锁文件为 `$XDG_STATE_HOME/leader-console/instance.lock`（未设置时为 `~/.local/state/leader-console/instance.lock`）。已有实例时启动会报“已有实例在运行”并退出。
-- **定期汇报**：面板按各项目 leader.json 的 `report_interval_min`，在 leader 空闲且身份核验通过时投递一行 `【定期汇报】project=<project> source=leader-console`；leader 忙、阻塞、离线或身份不符时暂缓，同一周期只投一次，重启不补发，不代写 heartbeat。默认比到期再晚 5 分钟（`-report-grace`），让 leader 自己的 cron 优先，面板做兜底。细节见 design §7.4。
-- **leader 切换 CLI**（如 Claude 额度用完改用 Codex）：旧 leader 退出、新 leader 写好 leader.json 之前，回答和汇报都排队；新 leader 写好后自动恢复投递，并在项目 leader 状态里标出“已切换 claude→codex”。操作步骤见 [docs/leader-switch.md](docs/leader-switch.md)。
+- **定期汇报**：面板按各项目 leader.json 的 `report_interval_min`，在 leader 空闲且身份核验通过时投递一行 `【定期汇报】project=<project> source=leader-console`；leader 忙、阻塞、离线或身份不符时暂缓，同一周期最多输入一次（投递前先把意图写进 panel.jsonl，写不进去就不投），重启不补发，不代写 heartbeat。默认比到期再晚 5 分钟（`-report-grace`），让 leader 自己的 cron 优先，面板做兜底。细节见 design §7.4。
+- **leader 切换 CLI**（如 Claude 额度用完改用 Codex）：旧 leader 退出、新 leader 写好 leader.json 之前，回答和汇报都排队（前提是旧 leader 已退出，见手册）；新 leader 写好后自动恢复投递，并在项目 leader 状态里标出“已切换 claude→codex”。操作步骤见 [docs/leader-switch.md](docs/leader-switch.md)。
 - **herdr 不可用**时页面顶部提示，任务不判 lost，回答排队等待。
 
 ## 配置

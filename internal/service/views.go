@@ -87,10 +87,13 @@ func (s *Service) decisionView(pd *model.ProjectData, d model.Decision, now time
 	state := decisionState(pd, d, a)
 	return model.DecisionView{Project: pd.Name, Decision: d, State: state, Answer: a, Overdue: d.Deadline != nil && now.After(*d.Deadline) && !closed(state), CanAnswer: state == model.DStateOpen && protocolAvailable(pd), ContextHTML: s.deps.Render(s.deps.Redact(d.Context))}
 }
+
+// protocolAvailable reports whether the project speaks the lc-1 panel protocol: a
+// structured state.json plus a leader.json declaring protocol_version lc-1. Answer
+// admission and every automatic prompt (answer delivery, reports, identity records)
+// depend on it, so a leader on an unknown protocol is never typed at.
 func protocolAvailable(pd *model.ProjectData) bool {
-	// The frozen Store port reports the source and parsed decisions, not file
-	// existence. A found decision on a structured project proves this capability.
-	return pd.Source == model.SourceState
+	return pd != nil && pd.Source == model.SourceState && pd.Leader != nil && pd.Leader.ProtocolVersion == model.ProtocolVersion
 }
 func closedAt(pd *model.ProjectData, dv model.DecisionView) time.Time {
 	t := dv.Decision.UpdatedAt

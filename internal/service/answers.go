@@ -237,7 +237,7 @@ func (s *Service) deliverOne(ctx context.Context, j deliveryJob) {
 		s.mu.Unlock()
 		return
 	}
-	if !p.Online || p.AgentStatus == "blocked" || !targetPattern.MatchString(p.Target) || pd.Leader == nil || s.deps.Herdr == nil {
+	if !p.Online || p.AgentStatus == "blocked" || !targetPattern.MatchString(p.Target) || !protocolAvailable(pd) || s.deps.Herdr == nil {
 		s.deferDelivery(key)
 		s.publishLocked()
 		s.mu.Unlock()

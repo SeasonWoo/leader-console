@@ -1,7 +1,8 @@
 #!/bin/sh
 # 端到端：夹具副本 + 假 herdr 启动真实二进制，用 curl 走一遍
 # overview → 取 token → 作答 → answers.jsonl 记 delivered → 假 herdr 收到【决策回传】→ 追加 decision_ack → acked；
-# 再走定时【定期汇报】：忙/身份不符/离线不投 → 空闲投一次 → 同周期不重复 → 重启不补发 → claude→codex 切换被识别。
+# 再走定时【定期汇报】：忙/身份不符/离线不投 → 空闲投一次 → 同周期不重复 → 重启不补发 → claude→codex 切换被识别
+# → 无 session 的 codex 名字丢失时不按 pane 兜底。
 # 用法：make e2e（或 scripts/e2e.sh [二进制路径]）。不读真实 ~/.leader，不调用真实 herdr。
 set -eu
 
@@ -216,5 +217,11 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 leader_json_set '.leader.agent = "codex" | del(.leader.session_id) | .started_at = $t | .heartbeat_at = $t' --arg t "$now"
 wait_for 10 "leader.change.switched" field_is '[.online, .agent, .change.switched, .change.from.agent, .change.to.agent] | join(",")' 'true,codex,true,claude,codex'
 sent_is 1 || fail "切换后立刻补发了定期汇报"
+
+step "codex leader 名字丢失（无 session）→ 不按 pane 兜底，判离线；恢复名字后重新在线"
+: >"$HS/leader_name"
+wait_for 10 "reason=agent_not_found" field_is '[.reason, .identified] | join(",")' 'agent_not_found,false'
+rm -f "$HS/leader_name"
+wait_for 10 "名字恢复后在线" field_is '[.online, .via] | join(",")' 'true,name'
 
 step "PASS"

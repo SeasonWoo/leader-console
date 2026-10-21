@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -32,6 +33,9 @@ type Config struct {
 	// ReportStartupDelay 是面板启动后首次投递前的最短等待，避免重启即投递。
 	ReportStartupDelay time.Duration
 }
+
+// projectRE 与 store 的项目目录名规则一致。
+var projectRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // Load 从 args（不含程序名）和环境变量解析配置。
 func Load(args []string) (Config, error) {
@@ -61,13 +65,20 @@ func Load(args []string) (Config, error) {
 	switch v := strings.TrimSpace(*reports); v {
 	case "all", "on":
 		cfg.Reports = true
-	case "off", "":
+	case "off":
 	default:
+		// An explicit project list that parses to nothing must not widen to "all".
 		cfg.Reports = true
 		for _, p := range strings.Split(v, ",") {
 			if p = strings.TrimSpace(p); p != "" {
+				if !projectRE.MatchString(p) {
+					return Config{}, fmt.Errorf("leader-reports: invalid project name %q", p)
+				}
 				cfg.ReportProjects = append(cfg.ReportProjects, p)
 			}
+		}
+		if len(cfg.ReportProjects) == 0 {
+			return Config{}, fmt.Errorf("leader-reports: %q names no project (use all, off or a comma-separated list)", v)
 		}
 	}
 	return cfg, cfg.Validate()

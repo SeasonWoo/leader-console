@@ -92,11 +92,12 @@ type LeaderMatch struct {
 // ResolveLeader 是在线判断（Project）和投递前复核（VerifyLeader）共用的唯一身份规则：
 //
 //  1. 有 herdr_name 时按名字找；
-//  2. 名字找不到（会话恢复后名字丢失）或从未命名时，按 pane_id 找，但该 pane 上的 agent
-//     若已有别的名字，说明 pane 被其他 agent 占用，不认；
+//  2. 名字找不到（会话恢复后名字丢失）或从未命名时，只有 leader.json 带 session_id 才按 pane_id 兜底，
+//     且现场 session 必须与之完全相同；该 pane 上的 agent 若已有别的名字，说明 pane 被其他 agent 占用，不认。
+//     没有 session（Codex）时同 pane、同 cwd、同 kind 的替换进程无法与原 leader 区分，所以不兜底，
+//     判 agent_not_found 排队，由 leader 自己恢复名字（协议 A4）；
 //  3. 候选必须 cwd 一致、agent kind 与 leader.json 声明一致（防止投给切换前的旧 CLI 或同 pane 的新 CLI）；
-//  4. session：双方都有时必须一致；按 pane 兜底一个原本有名字的 leader 时更严格，
-//     leader.json 有 session_id 就要求现场 session 完全相同（Codex 没有 session 时只能靠 pane + cwd + kind）。
+//  4. 按名字找到时，session 双方都有才比较（herdr 暂时没上报 session 不算不符）。
 func ResolveLeader(li *model.LeaderInfo, agents []herdr.Agent) LeaderMatch {
 	if li == nil {
 		return LeaderMatch{Reason: "agent_not_found"}
@@ -109,7 +110,7 @@ func ResolveLeader(li *model.LeaderInfo, agents []herdr.Agent) LeaderMatch {
 			}
 		}
 	}
-	if pane != "" {
+	if pane != "" && li.Leader.SessionID != "" {
 		for _, a := range agents {
 			if a.PaneID != pane {
 				continue
@@ -131,7 +132,7 @@ func VerifyLeader(li *model.LeaderInfo, target string, a herdr.Agent) bool {
 
 func checkLeader(li *model.LeaderInfo, a herdr.Agent, target, via string) LeaderMatch {
 	m := LeaderMatch{Agent: a, Target: target, Via: via, Found: true}
-	strictSession := via == "pane" && li.Leader.HerdrName != ""
+	strictSession := via == "pane"
 	switch {
 	case li.Cwd == "" || a.Cwd != li.Cwd:
 		m.Reason = "identity_mismatch"

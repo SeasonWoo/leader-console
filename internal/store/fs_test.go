@@ -487,7 +487,7 @@ func TestPanelLinesAppendAndFold(t *testing.T) {
 	}
 	at := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
 	for i := 0; i < model.PanelKeep+3; i++ {
-		if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, At: at.Add(time.Duration(i) * time.Minute), Delivery: model.DeliveryDelivered, Attempt: 1, Target: "leader-demo"}); err != nil {
+		if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, At: at.Add(time.Duration(i) * time.Minute), Delivery: model.DeliveryDelivered, Target: "leader-demo"}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -517,5 +517,62 @@ func TestPanelLinesAppendAndFold(t *testing.T) {
 	}
 	if err := f.AppendPanel(bg, "absent", model.PanelLine{}); !errors.Is(err, ErrProjectNotFound) {
 		t.Fatal(err)
+	}
+}
+
+// A crash mid-append left half a line; the next AppendPanel must still be readable.
+func TestAppendPanelAfterPartialTail(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	path := filepath.Join(root, "demo", "panel.jsonl")
+	put(t, path, `{"type":"leader","at":"2026-10-21T08:00:00Z","leader":{"agent":"claude"}}`+"\n"+`{"type":"report","at":`)
+	if pd := load(t, f, "demo"); len(pd.Panel.Leaders) != 1 || len(pd.Warnings) != 0 {
+		t.Fatalf("partial tail not ignored on read: %+v %v", pd.Panel, pd.Warnings)
+	}
+	at := time.Date(2026, 10, 21, 8, 10, 0, 0, time.UTC)
+	if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, At: at, Delivery: model.DeliveryDelivered, Target: "leader-demo"}); err != nil {
+		t.Fatal(err)
+	}
+	pd := load(t, f, "demo")
+	if len(pd.Panel.Reports) != 1 || !pd.Panel.Reports[0].At.Equal(at) || len(pd.Panel.Leaders) != 1 || len(pd.Warnings) != 0 {
+		t.Fatalf("append after partial tail lost: %+v %v", pd.Panel, pd.Warnings)
+	}
+}
+
+// Another process holding panel.jsonl.lock bounds the append and blocks no reads.
+func TestAppendPanelLockWaitIsBounded(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	lock, err := os.OpenFile(filepath.Join(root, "demo", "panel.jsonl.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan error, 1)
+	go func() {
+		done <- f.AppendPanel(ctx, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	}()
+	time.Sleep(30 * time.Millisecond)
+	read := make(chan struct{})
+	go func() { load(t, f, "demo"); load(t, f, "legacy-demo"); close(read) }()
+	select {
+	case <-read:
+	case <-time.After(time.Second):
+		t.Fatal("reads blocked behind a contended append")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("append ignored cancellation")
+	}
+	start := time.Now()
+	if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered}); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > appendLockTimeout+time.Second {
+		t.Fatalf("append not bounded: %v after %v", err, time.Since(start))
 	}
 }

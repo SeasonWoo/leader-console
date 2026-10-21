@@ -26,6 +26,7 @@ type fakeStore struct {
 	lines                                  []model.AnswerLine
 	listErr, loadErr, appendErr, reportErr error
 	panelErr                               error
+	panelFail                              func(model.PanelLine) error
 	panel                                  []model.PanelLine
 	report                                 []byte
 	refs                                   []model.ReportRef
@@ -95,6 +96,11 @@ func (f *fakeStore) AppendPanel(_ context.Context, p string, l model.PanelLine) 
 	defer f.mu.Unlock()
 	if f.panelErr != nil {
 		return f.panelErr
+	}
+	if f.panelFail != nil {
+		if err := f.panelFail(l); err != nil {
+			return err
+		}
 	}
 	pd := f.projects[p]
 	if pd == nil {
@@ -566,8 +572,12 @@ func TestPromptCleaningAndIdentity(t *testing.T) {
 		t.Fatalf("clean=%q", got)
 	}
 	li := &model.LeaderInfo{Cwd: "/x", Leader: model.LeaderAgent{PaneID: "w1:p1", SessionID: "s"}}
-	if !identityMatches(li, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) || identityMatches(li, "other", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) {
-		t.Fatal("pane/codex identity")
+	if !identityMatches(li, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1", SessionID: "s"}) || identityMatches(li, "other", herdr.Agent{Cwd: "/x", PaneID: "w1:p1", SessionID: "s"}) {
+		t.Fatal("pane identity")
+	}
+	// Pane targets need a verifiable session (review R1).
+	if identityMatches(li, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) || identityMatches(&model.LeaderInfo{Cwd: "/x", Leader: model.LeaderAgent{PaneID: "w1:p1"}}, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) {
+		t.Fatal("sessionless pane identity")
 	}
 	longAnswer := strings.Repeat("a", 128)
 	longPrompt := promptText(strings.Repeat("p", 128), model.Decision{ID: strings.Repeat("d", 128)}, model.Answer{AnswerID: longAnswer})

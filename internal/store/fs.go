@@ -43,6 +43,9 @@ type FS struct {
 	opts  FSOptions
 	mu    sync.Mutex
 	cache map[string]*model.ProjectData
+	// appends serializes in-process appends per file (os.Root create races otherwise)
+	// without holding mu, so a contended file lock never blocks other projects.
+	appends sync.Map // project/name → *sync.Mutex
 }
 
 var _ Store = (*FS)(nil)
@@ -457,9 +460,17 @@ func (f *FS) AppendPanel(ctx context.Context, project string, line model.PanelLi
 	return f.appendLine(ctx, project, "panel.jsonl", line)
 }
 
+// appendLockTimeout bounds the cross-process lock wait; another holder must not
+// stall the caller indefinitely.
+const appendLockTimeout = 3 * time.Second
+
+// appendLine does not hold f.mu while waiting for the file lock, so a contended
+// file never blocks reads or other projects. The cache needs no protection
+// here: LoadProject compares source fingerprints on every call.
 func (f *FS) appendLine(ctx context.Context, project, name string, line any) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	m, _ := f.appends.LoadOrStore(project+"/"+name, &sync.Mutex{})
+	m.(*sync.Mutex).Lock()
+	defer m.(*sync.Mutex).Unlock()
 	root, err := f.openProject(ctx, project)
 	if err != nil {
 		return err
@@ -472,9 +483,13 @@ func (f *FS) appendLine(ctx context.Context, project, name string, line any) err
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := jsonl.AppendRoot(root, name, name+".lock", b); err != nil {
+	lockCtx, cancel := context.WithTimeout(ctx, appendLockTimeout)
+	defer cancel()
+	if err := jsonl.AppendRootContext(lockCtx, root, name, name+".lock", b); err != nil {
 		return err
 	}
+	f.mu.Lock()
 	delete(f.cache, project)
+	f.mu.Unlock()
 	return nil
 }

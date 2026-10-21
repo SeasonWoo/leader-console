@@ -4,7 +4,8 @@ import "time"
 
 // PanelLine 是 ~/.leader/<project>/panel.jsonl 的一行，只由面板追加，leader 不读不写。
 // 记录面板自己的动作和观察，用于重启后去重和审计：
-//   - Type=report：一次【定期汇报】投递结果（delivered / retry / failed）；
+//   - Type=report：【定期汇报】投递记录：prompt 前的意图行（queued），之后的结果行
+//     （delivered；failed = 结果未知，消耗本周期；retry = herdr 拒绝、确定未输入）；
 //   - Type=leader：面板观察到的 leader.json 身份（首次看到或发生变化时各记一行）。
 type PanelLine struct {
 	Type PanelLineType `json:"type"`
@@ -12,7 +13,6 @@ type PanelLine struct {
 
 	// Type=report
 	Delivery DeliveryStatus `json:"delivery,omitempty"`
-	Attempt  int            `json:"attempt,omitempty"`
 	Target   string         `json:"target,omitempty"`
 	Error    string         `json:"error,omitempty"`
 

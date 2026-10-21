@@ -61,6 +61,17 @@ func presence(s *Service) model.LeaderPresence {
 	return model.LeaderPresence{}
 }
 
+// reportResults returns persisted report outcomes (intent lines excluded).
+func reportResults(f *fakeStore, delivery model.DeliveryStatus) []model.PanelLine {
+	var out []model.PanelLine
+	for _, l := range f.panelLines(model.PanelReport) {
+		if l.Delivery == delivery {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 func heartbeat(s *Service, f *fakeStore, at time.Time) {
 	f.edit(func(pd *model.ProjectData) { pd.Leader.HeartbeatAt = at; pd.Version += "h" })
 	_ = s.scan(bg)
@@ -83,8 +94,9 @@ func TestReportIdleDeliveryAndCycleDedup(t *testing.T) {
 	if got := reportPrompts(h); len(got) != 1 || got[0] != "leader-demo" {
 		t.Fatalf("report prompts = %v", got)
 	}
+	// Intent first, then the result: the cycle is consumed before anything is typed.
 	lines := f.panelLines(model.PanelReport)
-	if len(lines) != 1 || lines[0].Delivery != model.DeliveryDelivered || lines[0].Attempt != 1 || lines[0].Target != "leader-demo" {
+	if len(lines) != 2 || lines[0].Delivery != model.DeliveryQueued || lines[1].Delivery != model.DeliveryDelivered || lines[1].Target != "leader-demo" {
 		t.Fatalf("audit = %+v", lines)
 	}
 	// The leader has not refreshed heartbeat_at: the next report waits one more full
@@ -177,7 +189,7 @@ func TestReportDefersBusyBlockedOfflineAndForeignAgents(t *testing.T) {
 			if tc.name == "blocked at prompt" {
 				want = 1 // herdr refused it; nothing was typed
 			}
-			if len(h.prompts) != want || len(f.panelLines(model.PanelReport)) != 0 {
+			if len(h.prompts) != want || len(reportResults(f, model.DeliveryDelivered)) != 0 || len(reportResults(f, model.DeliveryFailed)) != 0 {
 				t.Fatalf("unsafe report: prompts=%v panel=%+v", h.prompts, f.panel)
 			}
 			if p := presence(s); p.Report == nil || p.Report.Waiting != tc.wait {
@@ -271,7 +283,7 @@ func TestReportRestartDoesNotReplay(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		fresh.reports(bg)
 	}
-	if len(reportPrompts(h)) != 3 || len(f.panelLines(model.PanelReport)) != 3 {
+	if len(reportPrompts(h)) != 3 || len(reportResults(f, model.DeliveryDelivered)) != 3 {
 		t.Fatal("replayed missed cycles")
 	}
 }
@@ -295,39 +307,111 @@ func TestReportGraceYieldsToLeaderCron(t *testing.T) {
 	}
 }
 
-func TestReportPromptFailuresRetryThenWaitNextCycle(t *testing.T) {
+// A prompt that timed out or stalled may have typed the text: the outcome is unknown,
+// so the cycle is used and nothing is resent before the next one.
+func TestReportUnknownOutcomeConsumesCycle(t *testing.T) {
 	s, f, h, c := setupReports(t)
-	for i := 0; i < 5; i++ {
-		h.promptErrors = append(h.promptErrors, &herdr.Error{Code: herdr.CodeAgentPromptStalled, Message: "secret-value"})
-	}
+	h.promptErrors = []error{&herdr.Error{Code: herdr.CodeAgentPromptStalled, Message: "secret-value"}}
 	c.advance(10 * time.Minute)
-	for i := 1; i <= 5; i++ {
-		s.reports(bg)
-		lines := f.panelLines(model.PanelReport)
-		if len(lines) != i || lines[i-1].Attempt != i || lines[i-1].Error == "" || lines[i-1].Error != "herdr: agent_prompt_stalled: ****" {
-			t.Fatalf("attempt %d: %+v", i, lines)
-		}
-		if want := map[bool]model.DeliveryStatus{true: model.DeliveryFailed, false: model.DeliveryRetry}[i == 5]; lines[i-1].Delivery != want {
-			t.Fatalf("delivery = %s", lines[i-1].Delivery)
-		}
-		if i < 5 {
-			c.advance(backoff(i) - time.Nanosecond)
-			s.reports(bg)
-			if len(f.panelLines(model.PanelReport)) != i {
-				t.Fatal("retried before backoff")
-			}
-			c.advance(time.Nanosecond)
-		}
+	s.reports(bg)
+	failed := reportResults(f, model.DeliveryFailed)
+	if len(failed) != 1 || failed[0].Error != "herdr: agent_prompt_stalled: ****" || presence(s).Report.LastError == "" {
+		t.Fatalf("failed = %+v", failed)
 	}
 	c.advance(10*time.Minute - time.Nanosecond)
-	s.reports(bg)
-	if len(h.prompts) != 5 {
-		t.Fatal("abandoned cycle retried early")
+	for i := 0; i < 3; i++ {
+		s.reports(bg)
+	}
+	if len(h.prompts) != 1 {
+		t.Fatal("resent within the cycle")
 	}
 	c.advance(time.Nanosecond)
 	s.reports(bg)
-	if lines := f.panelLines(model.PanelReport); len(lines) != 6 || lines[5].Delivery != model.DeliveryDelivered || lines[5].Attempt != 1 {
-		t.Fatalf("next cycle = %+v", lines)
+	if got := reportResults(f, model.DeliveryDelivered); len(h.prompts) != 2 || len(got) != 1 {
+		t.Fatalf("next cycle = %+v", got)
+	}
+}
+
+// Review R2: the prompt succeeded but its result could not be recorded. The panel
+// keeps the outcome in memory, retries only the audit, and never prompts again.
+func TestReportAuditFailureDoesNotResend(t *testing.T) {
+	s, f, h, c := setupReports(t)
+	f.panelFail = func(l model.PanelLine) error {
+		if l.Type == model.PanelReport && l.Delivery != model.DeliveryQueued {
+			return errors.New("disk full")
+		}
+		return nil
+	}
+	c.advance(10 * time.Minute)
+	s.reports(bg)
+	for i := 0; i < 8; i++ {
+		c.advance(15 * time.Second)
+		s.reports(bg)
+	}
+	if n := len(reportPrompts(h)); n != 1 {
+		t.Fatalf("resent %d times while the audit failed", n)
+	}
+	if p := presence(s).Report; p.Waiting != "audit_pending" || p.LastError != "disk full" || p.LastSentAt == nil {
+		t.Fatalf("schedule = %+v", p)
+	}
+	f.panelFail = nil
+	c.advance(15 * time.Second)
+	s.reports(bg)
+	if got := reportResults(f, model.DeliveryDelivered); len(got) != 1 || len(reportPrompts(h)) != 1 || len(s.reportAudit) != 0 {
+		t.Fatalf("audit not flushed: %+v", got)
+	}
+	if p := presence(s).Report; p.Waiting != "" || p.LastError != "" {
+		t.Fatalf("after flush = %+v", p)
+	}
+	c.advance(10 * time.Minute)
+	s.reports(bg)
+	if len(reportPrompts(h)) != 2 {
+		t.Fatal("next cycle blocked after the audit recovered")
+	}
+}
+
+// Without a durable intent the panel cannot guarantee one report per cycle: fail closed.
+func TestReportIntentFailureFailsClosed(t *testing.T) {
+	s, f, h, c := setupReports(t)
+	f.panelErr = errors.New("read-only")
+	c.advance(time.Hour)
+	for i := 0; i < 5; i++ {
+		s.reports(bg)
+		c.advance(15 * time.Second)
+	}
+	if len(h.prompts) != 0 {
+		t.Fatal("prompted without a durable intent")
+	}
+	if p := presence(s).Report; p.Waiting != "audit_failed" || p.LastError != "read-only" {
+		t.Fatalf("schedule = %+v", p)
+	}
+	f.panelErr = nil
+	s.reports(bg)
+	if len(reportPrompts(h)) != 1 {
+		t.Fatal("did not recover")
+	}
+}
+
+// Crash between the intent and the result: after restart the cycle counts as used.
+func TestReportOrphanIntentAfterRestart(t *testing.T) {
+	s, f, h, c := setupReports(t)
+	c.advance(10 * time.Minute)
+	f.edit(func(pd *model.ProjectData) {
+		pd.Panel.Reports = append(pd.Panel.Reports, model.PanelLine{Type: model.PanelReport, At: c.now(), Delivery: model.DeliveryQueued, Target: "leader-demo"})
+		pd.Version += "i"
+	})
+	fresh := New(s.deps, Options{LockPath: filepath.Join(t.TempDir(), "lock"), Reports: s.opts.Reports})
+	fresh.refreshHerdr(bg)
+	_ = fresh.scan(bg)
+	c.advance(5 * time.Minute)
+	fresh.reports(bg)
+	if len(h.prompts) != 0 {
+		t.Fatal("replayed an attempt with unknown outcome")
+	}
+	c.advance(5 * time.Minute)
+	fresh.reports(bg)
+	if len(reportPrompts(h)) != 1 {
+		t.Fatal("next cycle lost")
 	}
 }
 

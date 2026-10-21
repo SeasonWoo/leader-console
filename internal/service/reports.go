@@ -43,17 +43,21 @@ func (s *Service) reportsFor(project string) bool {
 	return o.Enabled && (len(o.Projects) == 0 || slices.Contains(o.Projects, project))
 }
 
-// reportPlan derives the schedule purely from leader.json and panel.jsonl, so a restart
-// resumes the same cycle instead of replaying missed ones:
+// reportPlan derives the schedule purely from leader.json, panel.jsonl and report lines
+// still waiting to be persisted, so a restart resumes the same cycle instead of
+// replaying missed ones:
 //
+//   - every report attempt is bracketed by an intent line (delivery=queued) written
+//     before the prompt and a result line after it. delivered/failed, and an intent
+//     whose result is unknown (crash, audit failure), consume the cycle: the panel never
+//     types twice into one cycle. Only retry, written when herdr refused the prompt
+//     (agent blocked / not found, nothing typed), cancels its intent;
 //   - a cycle starts at the later of heartbeat_at (the leader handled a report or an
-//     answer) and the panel's last delivered/abandoned report;
-//   - the next report is due one interval (+ grace) later; a report the leader has not
-//     acknowledged by refreshing heartbeat_at is never stacked, and each further
-//     unacknowledged report doubles the wait up to reportMaxBackoff intervals;
-//   - a failed attempt within a cycle retries on the answer-delivery backoff.
+//     answer) and the last consumed attempt; the next report is due one interval
+//     (+ grace) later. Each further report the leader has not acknowledged by
+//     refreshing heartbeat_at doubles the wait, up to reportMaxBackoff intervals.
 func (s *Service) reportPlan(pd *model.ProjectData) (model.ReportSchedule, bool) {
-	if pd == nil || pd.Leader == nil || !protocolAvailable(pd) || !s.reportsFor(pd.Name) {
+	if !protocolAvailable(pd) || !s.reportsFor(pd.Name) {
 		return model.ReportSchedule{}, false
 	}
 	li := pd.Leader
@@ -63,51 +67,46 @@ func (s *Service) reportPlan(pd *model.ProjectData) (model.ReportSchedule, bool)
 	}
 	plan := model.ReportSchedule{IntervalMin: interval}
 	base := li.HeartbeatAt
-	var retry *model.PanelLine
-	for i := range pd.Panel.Reports {
-		l := pd.Panel.Reports[i]
+	consume := func(at time.Time) {
+		if at.After(base) {
+			base = at
+		}
+	}
+	var intent *model.PanelLine
+	for _, l := range append(append([]model.PanelLine(nil), pd.Panel.Reports...), s.reportAudit[pd.Name]...) {
 		switch l.Delivery {
+		case model.DeliveryQueued:
+			if intent != nil {
+				consume(intent.At) // an earlier attempt's result was never recorded
+			}
+			intent = &l
+			continue
 		case model.DeliveryDelivered:
 			at := l.At
 			plan.LastSentAt = &at
 			if l.At.After(li.HeartbeatAt) {
 				plan.Unacked++
 			}
-			fallthrough
+			consume(l.At)
 		case model.DeliveryFailed:
-			if l.At.After(base) {
-				base = l.At
-			}
-			retry = nil
-		case model.DeliveryRetry:
-			retry = &pd.Panel.Reports[i]
+			consume(l.At)
 		}
+		intent = nil
 		plan.LastError = l.Error
+	}
+	if intent != nil {
+		consume(intent.At)
 	}
 	mult := 1
 	if plan.Unacked > 1 {
 		mult = min(1<<(plan.Unacked-1), reportMaxBackoff)
 	}
 	due := base.Add(time.Duration(interval*mult)*time.Minute + s.opts.Reports.Grace)
-	if retry != nil && retry.At.After(base) {
-		due = retry.At.Add(backoff(retry.Attempt))
-	}
 	if earliest := s.started.Add(s.opts.Reports.StartupDelay); due.Before(earliest) {
 		due = earliest
 	}
 	plan.NextDueAt = due
 	return plan, true
-}
-
-// reportAttempt continues the attempt count of a cycle whose last attempt failed; a
-// heartbeat refresh since then starts a new cycle.
-func reportAttempt(pd *model.ProjectData) int {
-	if n := len(pd.Panel.Reports); n > 0 {
-		if last := pd.Panel.Reports[n-1]; last.Delivery == model.DeliveryRetry && last.At.After(pd.Leader.HeartbeatAt) {
-			return last.Attempt
-		}
-	}
-	return 0
 }
 
 // reports runs one scheduler pass. It shares the delivery worker, so a report and an
@@ -120,7 +119,10 @@ func (s *Service) reports(ctx context.Context) {
 	var due []string
 	now := s.deps.Now()
 	for name, pd := range s.projects {
-		if plan, ok := s.reportPlan(pd); ok && !now.Before(plan.NextDueAt) && !now.Before(s.due[reportKey(name)]) {
+		if now.Before(s.due[reportKey(name)]) {
+			continue
+		}
+		if plan, ok := s.reportPlan(pd); ok && (len(s.reportAudit[name]) > 0 || !now.Before(plan.NextDueAt)) {
 			due = append(due, name)
 		}
 	}
@@ -172,6 +174,12 @@ func (s *Service) waitReport(project, reason string) {
 
 func (s *Service) reportOne(ctx context.Context, project string) {
 	s.mu.Lock()
+	if len(s.reportAudit[project]) > 0 {
+		// Fail closed: while an attempt's outcome is not durable, only retry the audit.
+		s.mu.Unlock()
+		s.flushReportAudit(ctx, project)
+		return
+	}
 	pd, p, wait := s.reportReady(ctx, project)
 	if wait != "" {
 		s.waitReport(project, wait)
@@ -201,65 +209,120 @@ func (s *Service) reportOne(ctx context.Context, project string) {
 		if wait == "" && (presence.Target != p.Target || !identityMatches(current.Leader, p.Target, agent)) {
 			wait = "not_identified"
 		}
-		pd = current
 	}
 	if wait != "" {
 		s.waitReport(project, wait)
 		s.mu.Unlock()
 		return
 	}
-	attempt := reportAttempt(pd) + 1
 	s.mu.Unlock()
+	// The intent is durable before anything is typed; if it cannot be written the
+	// panel cannot guarantee one report per cycle, so it does not prompt at all.
+	intent := model.PanelLine{Type: model.PanelReport, At: s.deps.Now(), Delivery: model.DeliveryQueued, Target: p.Target}
+	if err := s.appendPanel(ctx, project, intent); err != nil {
+		s.mu.Lock()
+		if ctx.Err() == nil {
+			s.reportFailure(project, "audit_failed", err)
+		}
+		s.mu.Unlock()
+		return
+	}
 	promptCtx, stop := context.WithTimeout(ctx, 10*time.Second)
 	err = s.deps.Herdr.Prompt(promptCtx, p.Target, reportText(project))
 	stop()
+	result := model.PanelLine{Type: model.PanelReport, At: s.deps.Now(), Delivery: model.DeliveryDelivered, Target: p.Target}
+	refused := ""
+	var he *herdr.Error
+	switch {
+	case errors.As(err, &he) && he.Code == herdr.CodeAgentBlocked:
+		result.Delivery, refused = model.DeliveryRetry, "leader_blocked"
+	case errors.As(err, &he) && he.Code == herdr.CodeAgentNotFound:
+		result.Delivery, refused = model.DeliveryRetry, "not_identified"
+	case err != nil:
+		// Timeouts and stalls may have typed the text: the outcome is unknown, so the
+		// cycle counts as used.
+		result.Delivery = model.DeliveryFailed
+	}
+	if err != nil {
+		result.Error = s.deps.Redact(cleanTerminal(err.Error()))
+	}
+	// Even if ctx was cancelled after the prompt, remember the outcome in memory first.
+	s.mu.Lock()
+	s.reportAudit[project] = append(s.reportAudit[project], result)
+	if refused != "" {
+		s.waitReport(project, refused)
+	}
+	s.mu.Unlock()
+	s.flushReportAudit(ctx, project)
+}
+
+// flushReportAudit persists result lines kept in memory. It never prompts.
+func (s *Service) flushReportAudit(ctx context.Context, project string) {
+	s.mu.Lock()
+	pending := append([]model.PanelLine(nil), s.reportAudit[project]...)
+	s.mu.Unlock()
+	written := 0
+	var err error
+	for _, line := range pending {
+		if err = s.appendPanel(ctx, project, line); err != nil {
+			break
+		}
+		written++
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ctx.Err() != nil {
-		return
-	}
-	var he *herdr.Error
-	if errors.As(err, &he) && (he.Code == herdr.CodeAgentBlocked || he.Code == herdr.CodeAgentNotFound) {
-		wait = "not_identified"
-		if he.Code == herdr.CodeAgentBlocked {
-			wait = "leader_blocked"
-		}
-		s.waitReport(project, wait)
-		return
-	}
-	line := model.PanelLine{Type: model.PanelReport, At: s.deps.Now(), Delivery: model.DeliveryDelivered, Attempt: attempt, Target: p.Target}
-	if err != nil {
-		line.Delivery = model.DeliveryRetry
-		if attempt%5 == 0 {
-			line.Delivery = model.DeliveryFailed
-		}
-		line.Error = s.deps.Redact(cleanTerminal(err.Error()))
-	}
-	if appendErr := s.deps.Store.AppendPanel(ctx, project, line); appendErr != nil {
-		// Without a durable record a retry could duplicate the report; wait a cycle step.
-		s.waitReport(project, "backoff")
-		return
+	s.reportAudit[project] = s.reportAudit[project][written:]
+	if len(s.reportAudit[project]) == 0 {
+		delete(s.reportAudit, project)
 	}
 	if latest, loadErr := s.loadLocked(ctx, project); loadErr == nil {
 		s.projects[project] = latest
 	}
-	delete(s.due, reportKey(project))
-	s.reportWait[project] = ""
 	if err != nil {
-		s.reportWait[project] = "backoff"
+		if ctx.Err() == nil {
+			s.reportFailure(project, "audit_pending", err)
+		}
+		return
+	}
+	if s.reportWait[project] == "audit_pending" || s.reportWait[project] == "audit_failed" {
+		s.reportWait[project] = ""
+	}
+	if w := s.reportWait[project]; w == "" {
+		delete(s.due, reportKey(project))
 	}
 	s.publishLocked()
 }
 
-// observeLeader appends a panel.jsonl leader line when leader.json describes a leader
-// identity the panel has not recorded yet (first sight, restart, rename or CLI switch).
-// Callers hold s.mu.
-func (s *Service) observeLeader(ctx context.Context, pd *model.ProjectData) *model.ProjectData {
-	if pd.Leader == nil || !protocolAvailable(pd) {
-		return pd
+// reportFailure records a storage problem as the waiting reason. Callers hold s.mu.
+func (s *Service) reportFailure(project, reason string, err error) {
+	s.reportError[project] = s.deps.Redact(cleanTerminal(err.Error()))
+	s.waitReport(project, reason)
+	s.publishLocked()
+}
+
+// appendPanel bounds a panel.jsonl append; it is always called without s.mu so a
+// contended file lock can never stall the service.
+func (s *Service) appendPanel(ctx context.Context, project string, line model.PanelLine) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err := s.deps.Store.AppendPanel(ctx, project, line)
+	if err == nil {
+		s.mu.Lock()
+		delete(s.reportError, project)
+		s.mu.Unlock()
+	}
+	return err
+}
+
+// leaderObservation returns the panel.jsonl leader line to append when leader.json
+// describes an identity the panel has not recorded yet (first sight, restart, rename
+// or CLI switch).
+func (s *Service) leaderObservation(pd *model.ProjectData) (model.PanelLine, bool) {
+	if !protocolAvailable(pd) {
+		return model.PanelLine{}, false
 	}
 	if n := len(pd.Panel.Leaders); n > 0 && model.SameLeader(pd.Panel.Leaders[n-1], pd.Leader) {
-		return pd
+		return model.PanelLine{}, false
 	}
 	agent := pd.Leader.Leader
 	line := model.PanelLine{Type: model.PanelLeader, At: s.deps.Now(), Leader: &agent}
@@ -267,14 +330,37 @@ func (s *Service) observeLeader(ctx context.Context, pd *model.ProjectData) *mod
 		started := pd.Leader.StartedAt
 		line.StartedAt = &started
 	}
-	if err := s.deps.Store.AppendPanel(ctx, pd.Name, line); err != nil {
-		pd.Warnings = appendWarning(pd.Warnings, s.deps.Redact("panel.jsonl: "+err.Error()))
-		return pd
+	return line, true
+}
+
+// observeLeaders appends the pending leader observations without holding s.mu, then
+// republishes the projects it touched.
+func (s *Service) observeLeaders(ctx context.Context, lines map[string]model.PanelLine) {
+	if len(lines) == 0 {
+		return
 	}
-	if latest, err := s.loadLocked(ctx, pd.Name); err == nil {
-		return latest
+	failed := map[string]string{}
+	for project, line := range lines {
+		if err := s.appendPanel(ctx, project, line); err != nil {
+			failed[project] = s.deps.Redact("panel.jsonl: " + err.Error())
+		}
 	}
-	return pd
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for project := range lines {
+		pd := s.projects[project]
+		if pd == nil {
+			continue
+		}
+		if msg, bad := failed[project]; bad {
+			pd = clone(pd)
+			pd.Warnings = appendWarning(pd.Warnings, msg)
+		} else if latest, err := s.loadLocked(ctx, project); err == nil {
+			pd = latest
+		}
+		s.projects[project] = pd
+	}
+	s.publishLocked()
 }
 
 // leaderChange returns the most recent recorded identity change, if any.

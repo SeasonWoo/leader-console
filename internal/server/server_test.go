@@ -111,7 +111,7 @@ func eventually(t *testing.T, p func() bool) {
 func apiFixture(t *testing.T) (*service.Service, *apiStore, *apiHerdr, http.Handler, string) {
 	t.Helper()
 	now := time.Now()
-	f := &apiStore{pd: model.ProjectData{Name: "demo", Source: model.SourceState, Version: "1", Leader: &model.LeaderInfo{Cwd: "/demo", Leader: model.LeaderAgent{Agent: "claude", HerdrName: "leader-demo"}, HeartbeatAt: now}, Tasks: []model.Task{{ID: "task", Name: "task", Status: model.TaskWorking, AgentName: "worker", Goal: "goal secret-value", CreatedAt: now}}, Decisions: []model.Decision{{ID: "d1", TaskID: "task", Question: "question", Status: model.DecisionOpen, Options: []model.Option{{Key: "A", Label: "Go"}}, AllowFreeText: true, CreatedAt: now, UpdatedAt: now}}}}
+	f := &apiStore{pd: model.ProjectData{Name: "demo", Source: model.SourceState, Version: "1", Leader: &model.LeaderInfo{ProtocolVersion: "lc-1", Cwd: "/demo", Leader: model.LeaderAgent{Agent: "claude", HerdrName: "leader-demo"}, HeartbeatAt: now}, Tasks: []model.Task{{ID: "task", Name: "task", Status: model.TaskWorking, AgentName: "worker", Goal: "goal secret-value", CreatedAt: now}}, Decisions: []model.Decision{{ID: "d1", TaskID: "task", Question: "question", Status: model.DecisionOpen, Options: []model.Option{{Key: "A", Label: "Go"}}, AllowFreeText: true, CreatedAt: now, UpdatedAt: now}}}}
 	h := &apiHerdr{}
 	svc := service.New(service.Deps{Store: f, Herdr: h, Reconcile: func(*model.ProjectData, []herdr.Agent, bool, time.Time) (model.LeaderPresence, map[string]model.TaskLive) {
 		return model.LeaderPresence{Online: true, Reason: "ok", Target: "leader-demo"}, map[string]model.TaskLive{"task": {AgentFound: true, AgentStatus: "working"}}

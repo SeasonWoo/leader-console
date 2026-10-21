@@ -284,12 +284,13 @@ Go：`model.AnswerLine`（磁盘行）、`model.Answer`（折叠后）。
 
 Go：`model.PanelLine`（磁盘行）、`model.PanelState`（折叠后，每类只保留最后 20 行）。与 answers.jsonl 同样的“flock + O_APPEND + 单次 write”。
 
-- `type=report`：一次【定期汇报】投递结果，`delivery ∈ {delivered, retry, failed}`、`attempt`、`target`、`error`。用于重启后续接周期（不补发）和审计。
+- `type=report`：【定期汇报】的投递记录，每次尝试两行：prompt **之前**写意图行 `delivery=queued`（写不进去就不 prompt），之后写结果行 `delivered`（成功）/ `failed`（超时、stalled 等结果未知）/ `retry`（herdr 拒绝：agent_blocked / agent_not_found，确定没打字），带 `target`、`error`。用于重启后续接周期（不补发）和审计。
 - `type=leader`：面板观察到的 leader.json 身份（`leader` 对象 + `started_at`），首次看到或 agent/名字/pane/session/started_at 任一变化时追加一行。相邻两行即一次“leader 变化”，agent 变了就是“切换 CLI”。
 
 ```jsonl
 {"type":"leader","at":"2026-10-21T16:00:00+08:00","leader":{"agent":"claude","herdr_name":"leader-demo","pane_id":"w1:pA","session_id":"e4916e66-…"},"started_at":"2026-10-21T09:00:00+08:00"}
-{"type":"report","at":"2026-10-21T16:10:05+08:00","delivery":"delivered","attempt":1,"target":"leader-demo"}
+{"type":"report","at":"2026-10-21T16:10:05+08:00","delivery":"queued","target":"leader-demo"}
+{"type":"report","at":"2026-10-21T16:10:05+08:00","delivery":"delivered","target":"leader-demo"}
 {"type":"leader","at":"2026-10-21T17:02:11+08:00","leader":{"agent":"codex","herdr_name":"leader-demo","pane_id":"w1:pA"},"started_at":"2026-10-21T17:01:40+08:00"}
 ```
 
@@ -385,9 +386,11 @@ stateDiagram-v2
 ### 7.3 投递
 
 - **目标解析**（`reconcile.ResolveLeader`，看板在线判断、决策回传、定期汇报共用同一规则；service 在真正 prompt 前用 `herdr agent get <target>` + `reconcile.VerifyLeader` 再复核一次）：
+  0. 自动 prompt（决策回传、定期汇报、身份记录）只对 `protocolAvailable` 的项目：有 state.json，且 leader.json 的 `protocol_version` 为 `lc-1`；面板作答也要求这一点。
   1. 无 leader.json → 离线（`no_leader_json`）；herdr 调用失败 → `herdr_unavailable`。
-  2. 有 `herdr_name` 时按名字找；名字找不到（会话恢复后名字丢失）或从未命名时按 `pane_id` 找，但该 pane 上的 agent 若带着别的名字，视为 pane 已被他人占用，不认。都找不到 → `agent_not_found`。
-  3. 身份核验：`cwd` 必须相等，否则 `identity_mismatch`（**防止 pane id 复用后把决策发给别的会话**）；agent kind 必须等于 leader.json 的 `leader.agent`，否则 `agent_kind_mismatch`（**leader 切换 CLI 时，新 CLI 写 leader.json 之前、或旧 CLI 还挂着名字时，都不投**）；session 双方都有时必须相等，按 pane 兜底一个原本有名字的 leader 时更严：leader.json 有 `session_id` 就要求现场完全相同（Codex 无 session，只能靠 pane + cwd + kind）。
+  2. 有 `herdr_name` 时按名字找。名字找不到（会话恢复后名字丢失）或从未命名时，**只有 leader.json 带 `session_id` 才按 `pane_id` 兜底**，且现场 session 必须完全相同；该 pane 上的 agent 若带着别的名字，视为 pane 已被他人占用，不认。没有 session（Codex）时不兜底：同 pane、同 cwd、同 kind 的替换进程与原 leader 无法区分，宁可判 `agent_not_found` 排队，由 leader 自己恢复名字（协议 A4）。都找不到 → `agent_not_found`。
+  3. 身份核验：`cwd` 必须相等，否则 `identity_mismatch`（**防止 pane id 复用后把决策发给别的会话**）；agent kind 必须等于 leader.json 的 `leader.agent`，否则 `agent_kind_mismatch`（**leader 切换 CLI 时，新 CLI 写 leader.json 之前、或旧 CLI 还挂着名字时，都不投**）；按名字找到时 session 双方都有才比较（herdr 暂时没上报 session 不算不符）。
+  **安全边界**：按名字识别时，同名、同 cwd、同 kind 的无 session agent 会被接受；名字是 leader 显式注册的，herdr 中唯一，这是可接受的前提。
   4. 以上通过即 `identified=true`、给出 target 与 `via`（name/pane）；再看心跳：`now − heartbeat_at > 2×interval + 5min` → `heartbeat_stale`（identified 但不 online），否则 `ok`。
   决策回传要求 online；定期汇报只要求 identified（§7.4）。
 - **prompt 文本**（固定模板，服务端生成，单行，去控制字符，≤ 300 字符）：
@@ -406,11 +409,15 @@ stateDiagram-v2
 ### 7.4 定时投递【定期汇报】
 
 - **开关**：`-leader-reports all|off|<逗号分隔项目>`（默认 `all`，只对有 state.json 的 lc-1 项目生效）；`-report-grace`（默认 5m）；`-report-startup-delay`（默认 1m）。
-- **到期**：周期起点 = max(`heartbeat_at`, panel.jsonl 中最后一次 delivered/failed 的汇报)；到期 = 起点 + `report_interval_min` + grace。leader 处理汇报会刷新 heartbeat_at，所以无论汇报来自面板还是 leader 自己的 CronCreate，同一周期最多一次。已投递但 leader 未刷新心跳（未确认）时不叠加：第 2 次起间隔按 2、4、6 倍拉长（上限 6 倍），刷新心跳后恢复。面板启动后至少等 startup-delay 才投，重启后从 panel.jsonl 续接周期，不补发错过的周期。
+- **到期**：周期起点 = max(`heartbeat_at`, 最后一次已消耗周期的尝试)。delivered、failed，以及只有意图行、结果未知（崩溃、审计写失败）的尝试都消耗周期；只有 `retry`（herdr 拒绝、确定没打字）不消耗；到期 = 起点 + `report_interval_min` + grace。leader 处理汇报会刷新 heartbeat_at，所以无论汇报来自面板还是 leader 自己的 CronCreate，同一周期最多一次。已投递但 leader 未刷新心跳（未确认）时不叠加：第 2 次起间隔按 2、4、6 倍拉长（上限 6 倍），刷新心跳后恢复。面板启动后至少等 startup-delay 才投，重启后从 panel.jsonl 续接周期，不补发错过的周期。
 - **何时投**：leader `identified` 且 herdr 状态为 `idle`/`done`；`working`/`unknown`（`leader_busy`）、`blocked`（`leader_blocked`）、找不到或身份不符（`not_identified`）都暂缓，每 15s 复查，不往 shell、审批框或进行中的回合里打字。投递前用 `agent get` 复核身份和状态，prompt 前再重读 leader.json（leader 的 cron 刚好触发、或 leader 刚被替换时放弃本次）。
 - **心跳过期仍投**：heartbeat_stale 但 identified 的 leader 照样投——这正是 cron 失效（Claude 7 天过期、`--continue` 后丢失）时把 leader 叫醒的手段。面板**不代写** heartbeat，看板上的在线判断保持真实，决策回传仍等 leader 刷新心跳后再投。
 - **文本**：`【定期汇报】project=<project> source=leader-console`。
-- **失败**：`agent_blocked`/`agent_not_found` 按暂缓处理；其他错误记 `delivery=retry`，退避与决策回传相同（5s→15s→30s→60s），第 5 次记 `failed`，本周期放弃，下个周期再来。
+- **失败与审计**（fail closed）：
+  - 意图行写不进 panel.jsonl → 不 prompt，`waiting=audit_failed`，15s 后再试；
+  - prompt 被 herdr 拒绝（`agent_blocked`/`agent_not_found`）→ 结果行 `retry`，暂缓 15s 后本周期内再试；
+  - 其他错误（超时、stalled、exec）→ 可能已经打了字，结果行 `failed`，本周期不再发，下个周期再来；
+  - 结果行写失败 → 结果先留在内存，`waiting=audit_pending`，之后只重试写审计、绝不重发 prompt，写成功后恢复正常调度；进程在此期间退出，重启后只看到意图行，按“结果未知”消耗周期。
 - **展示**：`LeaderPresence.report = {interval_min, next_due_at, last_sent_at, unacked, waiting, last_error}`；`LeaderPresence.change` = 最近一次 leader 身份变化（`switched=true` 表示换了 CLI，如 claude→codex）。
 
 ## 8. 并发与一致性
@@ -419,7 +426,7 @@ stateDiagram-v2
 |---|---|---|
 | leader.json / state.json | 仅本项目 leader | 写 `*.tmp` 后 `rename`（同目录原子替换）；读方要么看到旧版要么看到新版。 |
 | events.jsonl / decisions.jsonl | 仅本项目 leader（单写者） | `>>` 追加单行（O_APPEND）。leader 是串行执行工具调用的单写者，无写写竞争。 |
-| answers.jsonl / panel.jsonl | 面板（可能多个实例 / 多个 goroutine） | 进程内 `sync.Mutex` + 跨进程 `flock(answers.jsonl.lock, LOCK_EX)`；文件以 `O_WRONLY|O_APPEND|O_CREATE` 打开，**每行一次 `write` 调用**（先在内存拼好含 `\n` 的完整行），写后 `fsync`。 |
+| answers.jsonl / panel.jsonl | 面板（可能多个实例 / 多个 goroutine） | 进程内按文件的 `sync.Mutex` + 跨进程 `flock(<file>.lock, LOCK_EX)`，锁等待可取消、最长 3s（不阻塞其他项目的读取；panel.jsonl 的写入不在 service 全局锁内）；文件以 `O_RDWR|O_APPEND|O_CREATE` 打开，持锁后先把最后一个换行之后的残片（崩溃或短写留下的半行）截掉，再**每行一次 `write` 调用**（先在内存拼好含 `\n` 的完整行），写后 `fsync`。 |
 | reports/ | worker | 各任务独立目录；面板只读。 |
 
 读侧一致性：

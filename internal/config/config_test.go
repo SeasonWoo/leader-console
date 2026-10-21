@@ -44,6 +44,12 @@ func TestReportFlags(t *testing.T) {
 			}
 		}
 	}
+	// Review R6: an explicit but empty or invalid list is a configuration error, not "all".
+	for _, v := range []string{"", " ", ", ,", ",", "../x", "a,b c"} {
+		if cfg, err := Load([]string{"-leader-reports", v}); err == nil {
+			t.Fatalf("%q accepted as %+v", v, cfg)
+		}
+	}
 	if cfg, err := Load([]string{"-report-grace", "0s"}); err != nil || cfg.ReportGrace != 0 {
 		t.Fatal(cfg, err)
 	}

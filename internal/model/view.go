@@ -16,7 +16,7 @@ type LeaderPresence struct {
 	// Identified 表示 herdr 中找到了 leader.json 描述的 agent 且身份核验通过，不看心跳。
 	// Online = Identified 且心跳未过期。定期汇报只要求 Identified（它本身就是让心跳恢复的手段）。
 	Identified bool `json:"identified"`
-	// Via：name（按 herdr_name 找到）/ pane（名字丢失或未命名，按 pane_id + cwd + agent (+session) 兜底）。
+	// Via：name（按 herdr_name 找到）/ pane（名字丢失或未命名，且 leader.json 有 session_id 时按 pane_id + cwd + agent + 相同 session 兜底）。
 	Via string `json:"via,omitempty"`
 	// Agent 是 leader.json 声明的 agent kind；ObservedAgent 是现场找到的 agent kind。
 	Agent         string `json:"agent,omitempty"`
@@ -43,7 +43,8 @@ type ReportSchedule struct {
 	LastSentAt  *time.Time `json:"last_sent_at,omitempty"`
 	// Unacked 是最近连续投递后 leader 仍未刷新 heartbeat 的次数（>1 时间隔按倍数拉长）。
 	Unacked int `json:"unacked"`
-	// Waiting 说明已到期但暂缓的原因：not_identified / leader_busy / leader_blocked / backoff；未到期为空。
+	// Waiting 说明暂缓的原因：not_identified / leader_busy / leader_blocked（已到期才有）；
+	// audit_failed（意图行写不进 panel.jsonl，不投）/ audit_pending（已投，结果待写入，只重试审计）。
 	Waiting   string `json:"waiting,omitempty"`
 	LastError string `json:"last_error,omitempty"`
 }

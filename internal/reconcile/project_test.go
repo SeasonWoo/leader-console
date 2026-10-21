@@ -52,9 +52,19 @@ func TestLeaderPresence(t *testing.T) {
 		{name: "pane fallback requires session", ok: true, reason: "identity_mismatch", change: func(_ *model.LeaderInfo, a *herdr.Agent) { a.Name = ""; a.SessionID = "" }},
 		{name: "pane fallback rejects other session", ok: true, reason: "identity_mismatch", change: func(_ *model.LeaderInfo, a *herdr.Agent) { a.Name = ""; a.SessionID = "other" }},
 		{name: "pane fallback rejects other cwd", ok: true, reason: "identity_mismatch", change: func(_ *model.LeaderInfo, a *herdr.Agent) { a.Name = ""; a.Cwd = "/other" }},
-		{name: "codex name lost falls back without session", ok: true, reason: "ok", target: "w1:pA", via: "pane", change: func(li *model.LeaderInfo, a *herdr.Agent) {
+		// Review R1: without a session, an unrelated codex reusing the pane (same cwd, same
+		// kind, unnamed) is indistinguishable from the leader, so there is no pane fallback.
+		{name: "sessionless leader never falls back to pane", ok: true, reason: "agent_not_found", change: func(li *model.LeaderInfo, a *herdr.Agent) {
 			li.Leader.Agent, li.Leader.SessionID = "codex", ""
 			a.Agent, a.Name, a.SessionID = "codex", "", ""
+		}},
+		{name: "sessionless unnamed leader is not addressable", ok: true, reason: "agent_not_found", change: func(li *model.LeaderInfo, a *herdr.Agent) {
+			li.Leader.HerdrName, li.Leader.SessionID = "", ""
+			a.Name = ""
+		}},
+		{name: "unnamed leader requires the same session", ok: true, reason: "identity_mismatch", change: func(li *model.LeaderInfo, a *herdr.Agent) {
+			li.Leader.HerdrName = ""
+			a.Name, a.SessionID = "", ""
 		}},
 		// leader.json still describes the old claude leader while codex now runs in that pane.
 		{name: "switching kind on same pane", ok: true, reason: "agent_kind_mismatch", change: func(li *model.LeaderInfo, a *herdr.Agent) {
@@ -146,7 +156,7 @@ func TestLeaderSwitch(t *testing.T) {
 	if p := presence(next, codex, worker); !p.Online || p.Target != "leader-p" || p.ObservedAgent != "codex" {
 		t.Fatalf("after switch = %+v", p)
 	}
-	// A codex worker in the same directory is never mistaken for the leader.
+	// A named codex worker in another pane of the same directory is not the leader.
 	if p := presence(next, worker); p.Identified {
 		t.Fatalf("worker taken as leader = %+v", p)
 	}
@@ -157,10 +167,20 @@ func TestLeaderSwitch(t *testing.T) {
 	if !VerifyLeader(&next, "leader-p", codex) || VerifyLeader(&next, "leader-p", claude) || VerifyLeader(&next, "w1:pA", codex) || VerifyLeader(nil, "leader-p", codex) {
 		t.Fatal("VerifyLeader disagrees with Project")
 	}
+	// Codex has no session: once its name is gone it is not addressable by pane.
 	unnamed := codex
 	unnamed.Name = ""
-	if !VerifyLeader(&next, "w1:pA", unnamed) || VerifyLeader(&next, "leader-p", unnamed) {
-		t.Fatal("pane fallback recheck")
+	if VerifyLeader(&next, "w1:pA", unnamed) || VerifyLeader(&next, "leader-p", unnamed) {
+		t.Fatal("sessionless pane fallback")
+	}
+	if p := presence(next, unnamed); p.Identified || p.Reason != "agent_not_found" {
+		t.Fatalf("sessionless name lost = %+v", p)
+	}
+	// A claude leader with a session is still recognised by pane after losing its name.
+	lost := claude
+	lost.Name = ""
+	if !VerifyLeader(&old, "w1:pA", lost) || VerifyLeader(&old, "leader-p", lost) {
+		t.Fatal("session pane fallback recheck")
 	}
 }
 

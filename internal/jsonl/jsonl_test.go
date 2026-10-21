@@ -2,6 +2,7 @@ package jsonl
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -241,5 +242,63 @@ func TestAppendErrorsAndRoot(t *testing.T) {
 	file.Close()
 	if err := regular(file); err == nil {
 		t.Fatal("closed file")
+	}
+}
+
+// A crashed or short write leaves a fragment after the last newline; the next append
+// must not glue its line onto it (the reader would drop both).
+func TestAppendDropsPartialTail(t *testing.T) {
+	dir := t.TempDir()
+	long := strings.Repeat("x", 10000) // fragment longer than the backwards scan buffer
+	for name, tc := range map[string]struct{ before, want string }{
+		"fragment after lines": {`{"a":1}` + "\n" + `{"type":"report","at":`, `{"a":1}` + "\n" + `{"b":2}` + "\n"},
+		"only a fragment":      {`{"type":`, `{"b":2}` + "\n"},
+		"long fragment":        {`{"a":1}` + "\n" + long, `{"a":1}` + "\n" + `{"b":2}` + "\n"},
+		"long line kept":       {`{"a":"` + long + `"}` + "\n", `{"a":"` + long + `"}` + "\n" + `{"b":2}` + "\n"},
+		"empty":                {"", `{"b":2}` + "\n"},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "-"))
+		if err := os.WriteFile(path, []byte(tc.before), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := Append(path, path+".lock", []byte(`{"b":2}`)); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := os.ReadFile(path)
+		if string(got) != tc.want {
+			t.Fatalf("%s: %q", name, got)
+		}
+		lines, err := ReadLines(path)
+		if err != nil || string(lines[len(lines)-1]) != `{"b":2}` {
+			t.Fatalf("%s: appended line not readable: %q %v", name, lines, err)
+		}
+	}
+}
+
+func TestAppendLockWaitIsCancellable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data")
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = AppendRootContext(ctx, root, "data", "data.lock", []byte("{}"))
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+		t.Fatalf("lock wait not bounded: %v after %v", err, time.Since(start))
+	}
+	if b, _ := os.ReadFile(path); len(b) != 0 {
+		t.Fatal("wrote without the lock")
 	}
 }
