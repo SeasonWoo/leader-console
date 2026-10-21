@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -21,9 +23,21 @@ func readStatic(t *testing.T, name string) []byte {
 	return b
 }
 
+// 前端源码目录（相对本包）。mock JSON 与渲染安全检查直接读源码，不依赖构建产物。
+const frontendSrc = "../frontend/src"
+
+func readSource(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(frontendSrc, filepath.FromSlash(name)))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return b
+}
+
 func strictDecode(t *testing.T, name string, v any) {
 	t.Helper()
-	dec := json.NewDecoder(bytes.NewReader(readStatic(t, name)))
+	dec := json.NewDecoder(bytes.NewReader(readSource(t, name)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
 		t.Fatalf("strict decode %s into %T: %v", name, v, err)
@@ -33,77 +47,76 @@ func strictDecode(t *testing.T, name string, v any) {
 	}
 }
 
+var pages = []string{"index.html", "board/index.html", "task/index.html", "404.html"}
+
 func TestEmbeddedFiles(t *testing.T) {
-	for _, name := range []string{
-		"index.html", "style.css", "favicon.png",
-		"app.js", "api.js", "dom.js", "nav.js", "labels.js", "mock.js",
-		"views/decisions.js", "views/board.js", "views/task.js",
-		"mock/overview.json", "mock/overview-herdr-down.json", "mock/tasks.json",
-		"mock/details.json", "mock/reports.json", "mock/terminal.json",
-	} {
+	for _, name := range append([]string{"favicon.png", "theme-init.js"}, pages...) {
 		if _, err := fs.Stat(Static(), name); err != nil {
 			t.Errorf("missing embedded file %s: %v", name, err)
 		}
 	}
-}
-
-func TestIndexHTML(t *testing.T) {
-	html := string(readStatic(t, "index.html"))
-	if !strings.Contains(html, `<meta name="lc-token" content="__LC_TOKEN__">`) {
-		t.Error("index.html must keep the lc-token meta with __LC_TOKEN__ placeholder")
-	}
-	if !regexp.MustCompile(`<script type="module" src="/app.js"></script>`).MatchString(html) {
-		t.Error("index.html must load /app.js as an ES module")
-	}
-	// CSP 是 script-src 'self'; style-src 'self'：不能有内联脚本、内联样式、内联事件。
-	if regexp.MustCompile(`<script(?:\s[^>]*)?>\s*[^<\s]`).MatchString(html) {
-		t.Error("index.html must not contain inline scripts")
-	}
-	if regexp.MustCompile(`(?i)<style|\sstyle=|\son[a-z]+=`).MatchString(html) {
-		t.Error("index.html must not contain inline styles or event handlers")
+	exts := map[string]int{}
+	err := fs.WalkDir(Static(), "_next/static", func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			exts[filepath.Ext(path)]++
+		}
+		return err
+	})
+	if err != nil || exts[".js"] == 0 || exts[".css"] == 0 {
+		t.Errorf("_next/static must contain js and css chunks (got %v, err %v)", exts, err)
 	}
 }
 
-// 所有 <script src> / <link href> 必须是同源相对路径。
+// 页面 HTML：服务端在 <head> 开头注入 lc-token meta，并按哈希放行页面自带的内联脚本（internal/server）。
+// CSP 仍是 style-src 'self'：不能有内联样式和内联事件；手动外观切换走外链脚本。
+func TestPagesHTML(t *testing.T) {
+	for _, name := range pages {
+		html := string(readStatic(t, name))
+		if !regexp.MustCompile(`(?i)<head(\s[^>]*)?>`).MatchString(html) {
+			t.Errorf("%s: missing <head> (token injection point)", name)
+		}
+		if strings.Contains(html, "lc-token") || strings.Contains(html, "__LC_TOKEN__") {
+			t.Errorf("%s: the token meta is injected by the server and must not be in the export", name)
+		}
+		if regexp.MustCompile(`(?i)<style|\sstyle=|\son[a-z]+=`).MatchString(html) {
+			t.Errorf("%s: must not contain inline styles or event handlers", name)
+		}
+		if !strings.Contains(html, `<script src="/theme-init.js">`) {
+			t.Errorf("%s: theme-init.js must be loaded as an external, synchronous script", name)
+		}
+	}
+}
+
+// 所有 <script src> / <link href> 必须是同源相对路径，且文件已嵌入。
 func TestSameOriginAssets(t *testing.T) {
-	html := string(readStatic(t, "index.html"))
-	refs := regexp.MustCompile(`<(?:script|link)\b[^>]*\s(?:src|href)="([^"]*)"`).FindAllStringSubmatch(html, -1)
-	if len(refs) < 2 {
-		t.Fatalf("expected script and stylesheet references, got %v", refs)
-	}
-	for _, m := range refs {
-		u := m[1]
-		if !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
-			t.Errorf("asset %q is not a same-origin relative path", u)
-			continue
+	for _, name := range pages {
+		html := string(readStatic(t, name))
+		refs := regexp.MustCompile(`<(?:script|link)\b[^>]*\s(?:src|href)="([^"]*)"`).FindAllStringSubmatch(html, -1)
+		if len(refs) < 2 {
+			t.Fatalf("%s: expected script and stylesheet references, got %v", name, refs)
 		}
-		if _, err := fs.Stat(Static(), strings.TrimPrefix(u, "/")); err != nil {
-			t.Errorf("asset %q is not embedded: %v", u, err)
+		for _, m := range refs {
+			u, _, _ := strings.Cut(m[1], "?")
+			if !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
+				t.Errorf("%s: asset %q is not a same-origin relative path", name, m[1])
+				continue
+			}
+			if _, err := fs.Stat(Static(), strings.TrimPrefix(u, "/")); err != nil {
+				t.Errorf("%s: asset %q is not embedded: %v", name, m[1], err)
+			}
 		}
 	}
 }
 
-// static/ 中不得出现 http(s):// 外链；唯一例外是 mock JSON 中键名为 url 的外部链接字段。
+// HTML / CSS 中不得出现 http(s):// 外链（字体、样式、脚本一律本地）。JS 包里 React/Next 的报错文案含文档链接，
+// 不在此检查范围；运行时由 CSP default-src 'self' / connect-src 'self' 阻止任何外部加载。
 func TestNoExternalReferences(t *testing.T) {
 	ext := regexp.MustCompile(`(?i)https?://`)
 	err := fs.WalkDir(Static(), ".", func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil || d.IsDir() || !(strings.HasSuffix(path, ".html") || strings.HasSuffix(path, ".css")) {
 			return err
 		}
 		b := readStatic(t, path)
-		if strings.HasPrefix(path, "mock/") && strings.HasSuffix(path, ".json") {
-			var v any
-			if err := json.Unmarshal(b, &v); err != nil {
-				t.Errorf("%s: %v", path, err)
-				return nil
-			}
-			walkJSON(v, "", func(key, s string) {
-				if ext.MatchString(s) && key != "url" {
-					t.Errorf("%s: external link outside a url field (key %q): %q", path, key, s)
-				}
-			})
-			return nil
-		}
 		if loc := ext.FindIndex(b); loc != nil {
 			t.Errorf("%s: external reference %q", path, b[loc[0]:min(len(b), loc[1]+40)])
 		}
@@ -114,78 +127,57 @@ func TestNoExternalReferences(t *testing.T) {
 	}
 }
 
-func walkJSON(v any, key string, fn func(key, s string)) {
-	switch x := v.(type) {
-	case map[string]any:
-		for k, c := range x {
-			walkJSON(c, k, fn)
-		}
-	case []any:
-		for _, c := range x {
-			walkJSON(c, key, fn)
-		}
-	case string:
-		fn(key, x)
-	}
-}
-
-func jsFiles(t *testing.T) map[string]string {
+func sourceFiles(t *testing.T) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	err := fs.WalkDir(Static(), ".", func(path string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasSuffix(path, ".js") {
-			out[path] = string(readStatic(t, path))
+	err := filepath.WalkDir(frontendSrc, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && (strings.HasSuffix(path, ".ts") || strings.HasSuffix(path, ".tsx")) {
+			rel, _ := filepath.Rel(frontendSrc, path)
+			b, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			out[filepath.ToSlash(rel)] = string(b)
 		}
 		return err
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(out) == 0 {
+		t.Fatalf("read frontend sources: %v (%d files)", err, len(out))
 	}
 	return out
 }
 
-// ES module 只能从同源相对路径导入。
-func TestModuleImportsAreRelative(t *testing.T) {
-	imp := regexp.MustCompile(`(?m)(?:^\s*import\b[^"'\n]*|\bimport\()\s*["']([^"']+)["']`)
-	for path, src := range jsFiles(t) {
-		for _, m := range imp.FindAllStringSubmatch(src, -1) {
-			if !strings.HasPrefix(m[1], "./") && !strings.HasPrefix(m[1], "../") {
-				t.Errorf("%s: import %q is not a relative module path", path, m[1])
-			}
-		}
-	}
-}
-
-// 渲染安全（design §9）：唯一的 innerHTML 在 dom.js 的 serverHTML 里，且调用方只传服务端渲染的 *_html / html 字段。
+// 渲染安全（design §9）：唯一的 dangerouslySetInnerHTML 在 components/server-html.tsx，
+// 调用方只传服务端渲染的 *_html / html 字段；不使用其他会解析 HTML 字符串或执行代码的 API。
 func TestRenderingSafety(t *testing.T) {
-	banned := regexp.MustCompile(`\.outerHTML\s*=|insertAdjacentHTML|document\.write|\beval\(|new Function\(|createContextualFragment`)
-	inner := regexp.MustCompile(`\.innerHTML\b`)
-	call := regexp.MustCompile(`serverHTML\(([^)]*)\)`)
-	allowedArg := regexp.MustCompile(`^\w+,\s*[\w.]+\.(?:context_html|html)$`)
+	banned := regexp.MustCompile(`\.innerHTML\b|\.outerHTML\b|insertAdjacentHTML|document\.write|\beval\(|new Function\(|createContextualFragment|DOMParser`)
+	inner := regexp.MustCompile(`dangerouslySetInnerHTML`)
+	call := regexp.MustCompile(`<ServerHTML\b[^>]*\shtml=\{([^}]*)\}`)
+	allowedArg := regexp.MustCompile(`^[\w.?]+\.(?:context_html|html)$`)
 	calls := 0
-	for path, src := range jsFiles(t) {
+	for path, src := range sourceFiles(t) {
 		if loc := banned.FindStringIndex(src); loc != nil {
 			t.Errorf("%s: banned DOM API %q", path, src[loc[0]:loc[1]])
 		}
 		n := len(inner.FindAllStringIndex(src, -1))
-		if path == "dom.js" {
-			if n != 1 || !strings.Contains(src, "export function serverHTML(el, html) {\n  el.innerHTML = html") {
-				t.Errorf("dom.js: innerHTML must appear exactly once, inside serverHTML (found %d)", n)
+		if path == "components/server-html.tsx" {
+			if n != 1 || !strings.Contains(src, "dangerouslySetInnerHTML={{ __html: html }}") {
+				t.Errorf("server-html.tsx: dangerouslySetInnerHTML must appear exactly once, on the ServerHTML root (found %d)", n)
 			}
 			continue
 		}
 		if n > 0 {
-			t.Errorf("%s: innerHTML is only allowed inside dom.js serverHTML", path)
+			t.Errorf("%s: dangerouslySetInnerHTML is only allowed in components/server-html.tsx", path)
 		}
 		for _, m := range call.FindAllStringSubmatch(src, -1) {
 			calls++
 			if !allowedArg.MatchString(strings.TrimSpace(m[1])) {
-				t.Errorf("%s: serverHTML(%s) must receive a server-rendered *_html field", path, m[1])
+				t.Errorf("%s: <ServerHTML html={%s}> must receive a server-rendered *_html field", path, m[1])
 			}
 		}
 	}
-	if calls == 0 {
-		t.Error("expected serverHTML call sites for context_html and report html")
+	if calls < 2 {
+		t.Errorf("expected ServerHTML call sites for context_html and report html, got %d", calls)
 	}
 }
 
@@ -372,5 +364,36 @@ func TestMockCoversAllStates(t *testing.T) {
 		if !cols[c] {
 			t.Errorf("mock tasks have no card in column %q", c)
 		}
+	}
+}
+
+// mock JSON 会被打包进前端：外部链接只允许出现在键名为 url 的链接字段里。
+func TestMockNoExternalLinksOutsideURL(t *testing.T) {
+	ext := regexp.MustCompile(`(?i)https?://`)
+	for _, name := range []string{"overview", "overview-herdr-down", "tasks", "details", "reports", "terminal"} {
+		var v any
+		if err := json.Unmarshal(readSource(t, "mock/"+name+".json"), &v); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		walkJSON(v, "", func(key, s string) {
+			if ext.MatchString(s) && key != "url" {
+				t.Errorf("mock/%s.json: external link outside a url field (key %q): %q", name, key, s)
+			}
+		})
+	}
+}
+
+func walkJSON(v any, key string, fn func(key, s string)) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, c := range x {
+			walkJSON(c, k, fn)
+		}
+	case []any:
+		for _, c := range x {
+			walkJSON(c, key, fn)
+		}
+	case string:
+		fn(key, x)
 	}
 }

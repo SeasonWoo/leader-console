@@ -1,4 +1,4 @@
-// 设计 demo 追加的项目：参照真实 ~/.leader/trae-tob-dev 的数据形态（长目标、长进展、worker 复用、Markdown 背景），
+// mock 追加的项目：参照真实 ~/.leader/trae-tob-dev 的数据形态（长目标、长进展、worker 复用、Markdown 背景），
 // 用来检验长文本截断与信息层级。内容为虚构示例。
 
 import type { DecisionView, Overview, Report, TaskDetail, TaskView, TasksResponse } from "@/lib/types";

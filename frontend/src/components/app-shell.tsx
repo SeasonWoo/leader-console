@@ -88,6 +88,7 @@ function Sidebar() {
       <div className="flex h-16 items-center gap-2.5 px-5">
         <span className="grid size-7 place-items-center rounded-[8px] bg-fg text-[13px] font-semibold text-bg">L</span>
         <span className="text-[15px] font-semibold tracking-tight">Leader Console</span>
+        {scenario && <MockPill scenario={scenario} />}
       </div>
 
       <nav aria-label="页面" className="space-y-0.5 px-3">
@@ -139,10 +140,10 @@ function Sidebar() {
               <span className="text-fg-2">herdr</span>
               <span className="text-muted">{overview.herdr.ok ? `正常 · ${overview.herdr.agents} agents` : "不可用"}</span>
             </Status>
-            <Status tone={live === "offline" ? "red" : "accent"} className="text-[12px]">
+            <Status tone={live === "offline" ? "red" : live === "polling" || live === "connecting" ? "orange" : "accent"} className="text-[12px]">
               <span className="text-fg-2">实时</span>
               <span className="text-muted">
-                {{ sse: "SSE", polling: "轮询 5s", mock: scenario === "1" ? "mock 推送" : `mock · ${scenario}`, offline: "连接断开" }[live]}
+                {{ connecting: "连接中…", sse: "SSE", polling: "轮询 5s", mock: scenario === "1" ? "mock 推送" : `mock · ${scenario}`, offline: "连接断开" }[live]}
               </span>
               <span className="ml-auto pl-2 tabular-nums text-faint">{fmtClock(now, now)}</span>
             </Status>
@@ -155,7 +156,7 @@ function Sidebar() {
 }
 
 function MobileBar() {
-  const { overview } = useConsole();
+  const { overview, scenario } = useConsole();
   const { page, project } = usePage();
   const router = useRouter();
   const open = overview?.decisions.filter((d) => d.state === "open").length ?? 0;
@@ -163,6 +164,7 @@ function MobileBar() {
     <div className="sticky top-0 z-20 border-b border-line bg-glass backdrop-blur-xl backdrop-saturate-150 lg:hidden">
       <div className="flex h-13 items-center gap-3 px-5">
         <span className="text-[15px] font-semibold tracking-tight">Leader Console</span>
+        {scenario && <MockPill scenario={scenario} />}
         <nav aria-label="页面" className="ml-auto flex gap-1 text-[13px]">
           <Link href={decisionsHref(project)} className={cn("rounded-full px-3 py-1", page === "decisions" ? "bg-accent-soft text-accent" : "text-fg-2")}>
             待我决定{open ? ` ${open}` : ""}
@@ -186,6 +188,15 @@ function MobileBar() {
         </select>
       </div>
     </div>
+  );
+}
+
+/** mock 模式醒目标识：数据来自前端内存，不是真实 leader 数据。 */
+function MockPill({ scenario }: { scenario: string }) {
+  return (
+    <span title="数据来自前端内存 mock，不读写真实 leader 数据" className="rounded-full border border-orange/40 px-1.5 text-[11px] leading-[18px] font-medium text-orange">
+      {scenario === "1" ? "mock" : `mock · ${scenario}`}
+    </span>
   );
 }
 

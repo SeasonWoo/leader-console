@@ -137,7 +137,7 @@ function Info({ d }: { d: TaskDetail }) {
     ["仓库 / 分支", [t.repo, t.branch].filter(Boolean).join(" @ ")],
     ["worktree", t.worktree ? <span className="font-mono text-[12.5px] break-all">{t.worktree}</span> : ""],
     ["agent", t.agent_name],
-    ["父任务", t.parent_id ? <Link href={taskHref(d.project, t.parent_id)} className="text-accent hover:underline">{t.parent_id}</Link> : ""],
+    ["父任务", t.parent_id ? <Link prefetch={false} href={taskHref(d.project, t.parent_id)} className="text-accent hover:underline">{t.parent_id}</Link> : ""],
     ["返工", t.rework_count ? `${t.rework_count} 次` : ""],
     ["时间", times],
     [

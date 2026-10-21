@@ -1,6 +1,6 @@
 "use client";
 
-// 任务看板（/board?project=）。PRD §7.2、§8。每列按更新时间倒序：最新更新 / 最新完成的任务在最上面。
+// 任务看板（/board/?project=）。PRD §7.2、§8。每列按更新时间倒序（服务端排序）：最新更新 / 最新完成的任务在最上面。
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
@@ -19,14 +19,9 @@ import { cn } from "@/lib/cn";
 const DAY = 24 * 3600 * 1000;
 let showAllDone = false; // 跨刷新、跨页面保留“已完成”列的展开状态
 
-/** 排序键：updated_at，缺失时退回 created_at。 */
-function sortTime(tv: TaskView) {
+/** 最近变化时间：updated_at，缺失时退回 created_at（与 service 层排序一致，用于“已完成”列的 24h 筛选）。 */
+function changedAt(tv: TaskView) {
   return parseTime(tv.task.updated_at) ?? parseTime(tv.task.created_at) ?? 0;
-}
-
-/** 时间倒序；时间相同按 id 升序，保证稳定。 */
-export function byRecent(a: TaskView, b: TaskView) {
-  return sortTime(b) - sortTime(a) || (a.task.id < b.task.id ? -1 : a.task.id > b.task.id ? 1 : 0);
 }
 
 export function BoardView() {
@@ -111,8 +106,8 @@ function LeaderStrip({ projects, now }: { projects: ProjectSummary[]; now: numbe
 
 function Board({ tasks, showProject, now, allDone, onToggleDone }: { tasks: TaskView[]; showProject: boolean; now: number; allDone: boolean; onToggleDone: () => void }) {
   const byCol = Object.fromEntries(COLUMNS.map(([c]) => [c, [] as TaskView[]])) as Record<BoardColumn, TaskView[]>;
+  // 服务端已按更新时间倒序（同时间按 id）排好，分列时保持 API 顺序，不再重复排序。
   for (const t of tasks) (byCol[t.column] || byCol.in_progress).push(t);
-  for (const list of Object.values(byCol)) list.sort(byRecent);
 
   return (
     <div className="-mx-5 overflow-x-auto px-5 pb-2 sm:-mx-8 sm:px-8 lg:-mx-12 lg:px-12">
@@ -122,7 +117,7 @@ function Board({ tasks, showProject, now, allDone, onToggleDone }: { tasks: Task
           const total = list.length;
           let hidden = 0;
           if (col === "done") {
-            const recent = list.filter((t) => sortTime(t) >= now - DAY);
+            const recent = list.filter((t) => changedAt(t) >= now - DAY);
             hidden = total - recent.length;
             if (!allDone) list = recent;
           }
@@ -181,7 +176,7 @@ function TaskCard({ tv, showProject, now }: { tv: TaskView; showProject: boolean
       <div className="flex items-start gap-2">
         <h3 className="min-w-0 flex-1 text-[13.5px] leading-snug font-semibold break-all text-fg">
           {/* 整卡可点：链接的 ::after 覆盖卡片，其余链接通过 z-10 浮在上面 */}
-          <Link href={href} className="outline-none after:absolute after:inset-0 after:rounded-xl focus-visible:after:ring-2 focus-visible:after:ring-accent">
+          <Link prefetch={false} href={href} className="outline-none after:absolute after:inset-0 after:rounded-xl focus-visible:after:ring-2 focus-visible:after:ring-accent">
             {t.name || t.id}
           </Link>
         </h3>
@@ -225,7 +220,7 @@ function TaskCard({ tv, showProject, now }: { tv: TaskView; showProject: boolean
         {/* 运行中显示已运行时长；已结束显示最近更新时间（看板按它排序） */}
         <span className="inline-flex items-center gap-1 tabular-nums" title={tv.running_for_sec > 0 ? "已运行" : `${TASK_STATUS[t.status] || t.status} · 最近更新`}>
           <Clock className="size-3" aria-hidden />
-          {tv.running_for_sec > 0 ? fmtDuration(tv.running_for_sec) : `更新于 ${fmtAgo(sortTime(tv), now)}`}
+          {tv.running_for_sec > 0 ? fmtDuration(tv.running_for_sec) : `更新于 ${fmtAgo(changedAt(tv), now)}`}
         </span>
         {!!t.rework_count && (
           <span className="inline-flex items-center gap-1">

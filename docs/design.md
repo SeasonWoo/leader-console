@@ -5,8 +5,8 @@
 
 ## 1. 约束与原则
 
-- **单二进制**：Go 1.24，只用标准库（`net/http` 1.22+ 路由模式、`encoding/json`、`embed`、`os/exec`、`syscall.Flock`）。`go build` 后一个文件即可运行，零第三方依赖。
-- **无前端构建链**：原生 HTML + CSS + ES module，`//go:embed` 打包；实时刷新用 SSE，失败回退 5s 轮询。
+- **单二进制**：Go 1.24，只用标准库（`net/http` 1.22+ 路由模式、`encoding/json`、`embed`、`os/exec`、`syscall.Flock`）。`go build` 后一个文件即可运行，Go 侧零第三方依赖。
+- **前端静态导出**：Next.js（App Router，TypeScript）`output: 'export'` + Tailwind CSS v4，产物 `web/dist` 入库并 `//go:embed`；运行时不需要 Node，没有 Next server / API routes，数据全部走 `/api/v1/*` 与 SSE；实时刷新用 SSE，失败回退 5s 轮询。
 - **文件即数据库**：所有状态都在 `~/.leader/*/` 的文件里，面板进程无状态，可随时重启。面板只写一种文件：`answers.jsonl`。
 - **只读优先**：面板对 herdr 只用 `agent list/get/read`，唯一的写是 `agent prompt`（模板化文本，只发给已核验身份的 leader）。
 - **单机单用户**：只监听回环地址；写接口 token + Host/Origin 校验。
@@ -21,7 +21,7 @@
 | 实时 | SSE（`text/event-stream`）只推“版本号变化”，前端再拉数据 | 比 WebSocket 简单，标准库即可；只推版本号避免 SSE 与 REST 两套数据格式。 |
 | 文件变更检测 | 每 2s 对 `~/.leader/*/` 做 `stat`（size+mtime 指纹），变化才重新解析 | fsnotify 是第三方依赖；项目数 < 20、文件 < 1MB，`stat` 成本可忽略。 |
 | Markdown 渲染 | 自写安全子集渲染器（标题、段落、列表、代码块、表格、链接、粗体/行内代码） | goldmark 质量更好但引入依赖；报告内容简单，子集够用。**待决策**：是否允许 goldmark 作为唯一例外（见 §12）。 |
-| 前端 | 原生 ES module，`textContent` 渲染，hash 路由 | 页面只有 3 个，无需框架；无 Node。 |
+| 前端 | Next.js 16 静态导出 + React 19 + Tailwind CSS v4 + lucide-react（pnpm 锁版本）；路由 `/`、`/board/`、`/task/?project=&id=&report=`（静态导出不支持动态段，用查询参数） | 组件化后视觉与交互更易维护；只用静态导出，运行时仍是 Go 单二进制。产物入库，干净 clone 不装 Node 也能 `go build`。原生 ES module 方案（v1）已替换。 |
 | jsonl 并发 | `O_APPEND` + 单次 `write` + 旁路锁文件 `flock` | 见 §8。 |
 | herdr 调用 | `os/exec` 参数数组（不经 shell），命令前缀可配置，超时 5s | 避免注入；可指向 `testdata/fake-herdr.sh` 做测试。 |
 
@@ -112,9 +112,10 @@ leader-console/
 │   ├── render/         # D
 │   ├── service/        # B
 │   └── server/         # B
+├── frontend/           # Next.js 源码（src/app 页面、src/features、src/components、src/lib、src/mock）
 ├── web/
-│   ├── web.go          # embed
-│   └── static/         # C：index.html / app.js / style.css / mock/*.json
+│   ├── web.go          # embed all:dist
+│   └── dist/           # frontend 静态导出产物（入库）
 ├── testdata/
 │   ├── fixtures/leader-root/{demo,legacy-demo}/   # 共享夹具（新协议 / 过渡期）
 │   └── fake-herdr.sh                               # 假 herdr（格式对齐 0.9.3）
@@ -411,8 +412,8 @@ stateDiagram-v2
 |---|---|
 | 远程访问 | 只允许回环监听地址（`config.Validate`，骨架已实现）。 |
 | DNS rebinding | 所有请求校验 `Host` ∈ {`127.0.0.1:<port>`, `localhost:<port>`, `[::1]:<port>`}，否则 403。 |
-| CSRF | 写接口要求 `X-LC-Token`（32 字节 `crypto/rand`，hex）；自定义头会触发 CORS 预检，而面板不返回任何 CORS 头；再校验 `Origin`。token 仅存在内存，通过首页 `<meta name="lc-token">` 注入（跨源页面无法读取同源 HTML）。 |
-| XSS | 前端只用 `textContent` / `createElement`；唯一的 `innerHTML` 是服务端 render 产出的 HTML（先整体转义再生成白名单标签，链接仅 http/https，加 `rel="noopener noreferrer"`）。响应头 `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`，`X-Content-Type-Options: nosniff`，`Referrer-Policy: no-referrer`。 |
+| CSRF | 写接口要求 `X-LC-Token`（32 字节 `crypto/rand`，hex）；自定义头会触发 CORS 预检，而面板不返回任何 CORS 头；再校验 `Origin`。token 仅存在内存，由服务端插入每个 HTML 页面 `<head>` 开头的 `<meta name="lc-token">`（跨源页面无法读取同源 HTML）。 |
+| XSS | 前端由 React 渲染文本（自动转义）；唯一插入 HTML 字符串的地方是 `components/server-html.tsx`，只接收服务端 render 产出的 `context_html` / 报告 `html`（先整体转义再生成白名单标签，链接仅 http/https，加 `rel="noopener noreferrer"`），`web/web_test.go` 对源码做静态检查。响应头 `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'`；HTML 页面的 `script-src` 额外列出该页面自带内联脚本（Next 引导与 RSC 载荷）的 `'sha256-…'`（启动后首次访问时计算并缓存），不使用 `unsafe-inline`。`X-Content-Type-Options: nosniff`，`Referrer-Policy: no-referrer`。 |
 | 凭证泄露 | redact 对报告、终端输出、结果摘要、决策背景、事件摘要脱敏：`AKIA/AKLT…` 类 AK、`sk-`/`ghp_`/`glpat-`/`xox[bp]-` 类 token、JWT（`eyJ…\.eyJ…\.…`）、PEM 私钥块、`Bearer <x>`、`(password|passwd|secret|token|api[_-]?key|access[_-]?key|auth[_-]?key|secret[_-]?key)\s*[:=]\s*<值>` 的值部分；保留前 4 位 + `****`。 |
 | 路径穿越 | project/task/report 参数先匹配 id 正则；报告只从 `reports/<task>/` 读（`filepath.Rel` 校验仍在目录内，`Lstat` 拒绝符号链接）；过渡期 `/tmp` 报告只允许 `^/tmp/[A-Za-z0-9._-]+\.md$` **且**被该项目 ledger 结果列引用；读取上限 1 MiB。 |
 | 命令执行 | 只执行配置的 herdr 命令前缀 + 固定子命令；参数数组不经 shell；prompt 文本模板化、去控制字符；target 来自 leader.json 且经身份核验。不暴露任何“执行命令”接口。 |

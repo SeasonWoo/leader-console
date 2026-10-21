@@ -17,14 +17,12 @@ export const viewport: Viewport = {
   ],
 };
 
-// demo：在首帧前应用手动选择的外观，避免闪烁。完整迁移时改为外链脚本或去掉手动切换，以满足 script-src 'self'。
-const themeInit = `try{var t=localStorage.getItem("lc-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}`;
-
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: themeInit }} />
+        {/* 同步外链脚本：首帧前应用手动选择的外观（public/theme-init.js）。服务端会在 <head> 开头注入 lc-token meta。 */}
+        <script src="/theme-init.js" />
       </head>
       <body>
         <Suspense fallback={<ShellFallback />}>

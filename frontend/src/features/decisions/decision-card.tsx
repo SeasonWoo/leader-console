@@ -69,7 +69,7 @@ export function DecisionCard({ v, readonly, onChanged, focused }: { v: DecisionV
         {d.task_id && (
           <>
             <span className="text-faint">/</span>
-            <Link href={taskHref(v.project, d.task_id)} className="hover:text-accent">
+            <Link prefetch={false} href={taskHref(v.project, d.task_id)} className="hover:text-accent">
               {d.task_id}
             </Link>
           </>
@@ -449,7 +449,7 @@ function Related({ v }: { v: DecisionView }) {
       {refs.map((p) => {
         const base = p.split("/").pop() || p;
         return d.task_id ? (
-          <Link key={p} href={taskHref(v.project, d.task_id, base)} className="inline-flex items-center gap-1 text-muted hover:text-accent">
+          <Link key={p} prefetch={false} href={taskHref(v.project, d.task_id, base)} className="inline-flex items-center gap-1 text-muted hover:text-accent">
             <FileText className="size-3.5" aria-hidden />
             {base}
           </Link>
@@ -461,7 +461,7 @@ function Related({ v }: { v: DecisionView }) {
         );
       })}
       {d.task_id && (
-        <Link href={taskHref(v.project, d.task_id)} className="ml-auto inline-flex items-center gap-1 font-medium text-accent hover:underline">
+        <Link prefetch={false} href={taskHref(v.project, d.task_id)} className="ml-auto inline-flex items-center gap-1 font-medium text-accent hover:underline">
           任务详情
           <ArrowRight className="size-3.5" aria-hidden />
         </Link>

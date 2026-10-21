@@ -1,5 +1,5 @@
-// 内存 mock 后端（设计 demo 用）：读取 src/mock/*.json（与 web/static/mock 同源），模拟写接口与回传进度。
-// 不会请求任何真实接口。场景：默认 / herdr-down（URL ?mock=herdr-down）。
+// 内存 mock 后端：URL 带 ?mock=1（或 ?mock=herdr-down）时由 api.ts 按需加载。数据为 src/mock/*.json
+// （web/web_test.go 按 Go 视图契约严格解码校验）加上 src/mock/extra.ts，模拟写接口与回传进度，不访问真实接口。
 
 import overviewJSON from "@/mock/overview.json";
 import overviewDownJSON from "@/mock/overview-herdr-down.json";
@@ -8,12 +8,14 @@ import detailsJSON from "@/mock/details.json";
 import reportsJSON from "@/mock/reports.json";
 import terminalJSON from "@/mock/terminal.json";
 import { extraProject } from "@/mock/extra";
+import { parseTime } from "./format";
 import type {
   AnswerInput,
   DecisionView,
   Overview,
   Report,
   TaskDetail,
+  TaskView,
   TasksResponse,
   Terminal,
 } from "./types";
@@ -43,6 +45,13 @@ interface DB {
   terminal: Record<string, { visible: Terminal; recent: Terminal }>;
 }
 
+/** 与 service.sortTasks 一致：updated_at（缺失退回 created_at）倒序，同时间按 id、再按项目名升序。 */
+export function sortTasks(tasks: TaskView[]) {
+  const at = (t: TaskView) => parseTime(t.task.updated_at) ?? parseTime(t.task.created_at) ?? 0;
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  tasks.sort((a, b) => at(b) - at(a) || cmp(a.task.id, b.task.id) || cmp(a.project, b.project));
+}
+
 export function createMock(scenario: string) {
   const herdrDown = scenario === "herdr-down";
   const listeners = new Set<(v: string) => void>();
@@ -56,6 +65,7 @@ export function createMock(scenario: string) {
     terminal: clone(terminalJSON as unknown as DB["terminal"]),
   };
   extraProject(db, herdrDown);
+  sortTasks(db.tasks.tasks);
   if (herdrDown) {
     // herdr 不可用：live 为空，不判 lost（design §10）。
     for (const t of [...db.tasks.tasks, ...Object.values(db.details)]) {
@@ -135,6 +145,10 @@ export function createMock(scenario: string) {
     const option = (input.option || "").trim();
     const text = (input.text || "").trim();
     if (!option && !text) return fail(400, "invalid_answer", "请选择一个选项或填写说明");
+    if (option && !(view.decision.options || []).some((o) => o.key === option))
+      return fail(400, "invalid_answer", `选项 ${option} 不存在`);
+    if (text && !view.decision.allow_free_text) return fail(400, "invalid_answer", "该决策不接受补充说明");
+    if (text.length > 2000) return fail(400, "invalid_answer", "补充说明过长");
     const at = iso();
     view.answer = {
       answer_id: `a-mock-${Date.now().toString(36)}`,

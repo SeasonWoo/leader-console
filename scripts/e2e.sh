@@ -1,7 +1,9 @@
 #!/bin/sh
 # 端到端：夹具副本 + 假 herdr 启动真实二进制，用 curl 走一遍
-# overview → 取 token → 作答 → answers.jsonl 记 delivered → 假 herdr 收到【决策回传】→ 追加 decision_ack → acked。
+# overview → 取 token → 作答 → answers.jsonl 记 delivered → 假 herdr 收到【决策回传】→ 追加 decision_ack → acked；
+# 再用无头 Chrome 在真实 CSP 下走查三个页面并在页面上作答一次（scripts/e2e-browser.mjs）。
 # 用法：make e2e（或 scripts/e2e.sh [二进制路径]）。不读真实 ~/.leader，不调用真实 herdr。
+# 本机没有 Chrome / node 时浏览器阶段跳过并提示；E2E_REQUIRE_BROWSER=1 时改为失败。
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -10,6 +12,7 @@ ADDR=${E2E_ADDR:-127.0.0.1:17799}
 BASE=http://$ADDR
 PROJECT=demo
 DECISION=d-20261021-001
+UI_DECISION=d-e2e-ui
 
 for tool in curl jq; do
 	command -v "$tool" >/dev/null || { echo "e2e: 需要 $tool" >&2; exit 1; }
@@ -74,6 +77,9 @@ jq --arg now "$now" '.tasks += [
   {id:"sort-a", name:"sort-a", status:"done", updated_at:"2020-01-01T08:00:00+08:00"}
 ]' "$state_json" >"$state_json.new"
 mv "$state_json.new" "$state_json"
+# 浏览器阶段在页面上作答的决策（curl 阶段用 $DECISION，两者互不影响）。
+printf '{"id":"%s","task_id":"uih-fe","question":"e2e：页面作答是否可用？","options":[{"key":"A","label":"可用"},{"key":"B","label":"不可用"}],"allow_free_text":true,"urgency":"low","status":"open","created_at":"%s","updated_at":"%s"}\n' \
+	"$UI_DECISION" "$now" "$now" >>"$TMP/root/$PROJECT/decisions.jsonl"
 
 step "启动 ${BIN}（${ADDR}，假 herdr）"
 XDG_STATE_HOME=$TMP/state FAKE_HERDR_LOG=$TMP/herdr.log \
@@ -152,5 +158,38 @@ step "模拟 leader 追加 decision_ack → acked"
 printf '{"ts":"%s","type":"decision_ack","actor":"leader","task_id":"uih-copilot","decision_id":"%s","answer_id":"%s","summary":"收到：A 提交并提 MR"}\n' \
 	"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DECISION" "$answer_id" >>"$TMP/root/$PROJECT/events.jsonl"
 wait_for 10 "overview 状态 acked" state_is acked
+
+step "页面路由：/、/board、/board/、/task/ 返回注入 token 的 HTML，CSP 只按哈希放行内联脚本"
+for page in / /board /board/ "/task/?project=$PROJECT&id=uih-copilot"; do
+	curl -fsS -D "$TMP/page.h" "$BASE$page" >"$TMP/page.html" || fail "页面 $page 不可访问"
+	grep -q "<head><meta name=\"lc-token\" content=\"$token\">" "$TMP/page.html" || fail "页面 $page 未注入 token"
+	csp=$(tr -d '\r' <"$TMP/page.h" | sed -n 's/^[Cc]ontent-[Ss]ecurity-[Pp]olicy: //p')
+	case $csp in *"script-src 'self' 'sha256-"*) ;; *) fail "页面 $page 的 CSP 没有内联脚本哈希：$csp" ;; esac
+	case $csp in *unsafe-inline* | *unsafe-eval*) fail "页面 $page 的 CSP 放宽了：$csp" ;; esac
+done
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/no-such-page")
+[ "$code" = 404 ] || fail "不存在的页面返回 $code"
+
+step "浏览器走查（无头 Chrome，真实 CSP）：三个页面、客户端导航、旧 hash 链接、页面作答 $UI_DECISION"
+browser=0
+if command -v node >/dev/null; then
+	node "$ROOT/scripts/e2e-browser.mjs" "$BASE" "$PROJECT" "$UI_DECISION" || browser=$?
+else
+	browser=2
+fi
+case $browser in
+0)
+	ui_delivered() {
+		jq -e --arg d "$UI_DECISION" 'select(.type=="answer" and .decision_id==$d)' "$answers" | grep -q . &&
+			grep -q "decision=$UI_DECISION " "$TMP/herdr.log"
+	}
+	wait_for 20 "页面作答写入 answers.jsonl 并回传" ui_delivered
+	;;
+2)
+	[ "${E2E_REQUIRE_BROWSER:-}" = 1 ] && fail "需要浏览器阶段，但找不到 Chrome 或 node"
+	printf 'e2e: SKIP 浏览器阶段（找不到 Chrome 或 node；可用 CHROME=<路径> 指定）\n' >&2
+	;;
+*) fail "浏览器走查失败" ;;
+esac
 
 step "PASS"

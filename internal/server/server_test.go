@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -125,13 +127,26 @@ func apiFixture(t *testing.T) (*service.Service, *apiStore, *apiHerdr, http.Hand
 		}
 	})
 	eventually(t, func() bool { return len(svc.Overview().Projects) == 1 })
-	handler := New(svc, fstest.MapFS{"index.html": {Data: []byte(`<meta name="lc-token" content="__LC_TOKEN__">`)}, "app.js": {Data: []byte("export const app = true;")}, "dir/file.txt": {Data: []byte("file")}}, Options{})
+	handler := New(svc, testPages(), Options{})
 	index := perform(handler, "GET", "/", "", nil)
 	token := regexp.MustCompile(`content="([a-f0-9]{64})"`).FindStringSubmatch(index.Body.String())
 	if len(token) != 2 {
 		t.Fatal("token missing", index.Body.String())
 	}
 	return svc, f, h, handler, token[1]
+}
+
+// testPages mimics a Next.js static export: pages with an inline bootstrap script and external chunks.
+func testPages() fstest.MapFS {
+	page := func(inline string) *fstest.MapFile {
+		return &fstest.MapFile{Data: []byte(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"/><script src="/app.js" async=""></script></head><body><div>page</div><script>` + inline + `</script><script id="_R_">self.r=1</script></body></html>`)}
+	}
+	return fstest.MapFS{
+		"index.html":       page("self.p='index'"),
+		"board/index.html": page("self.p='board'"),
+		"app.js":           {Data: []byte("export const app = true;")},
+		"dir/file.txt":     {Data: []byte("file")},
+	}
 }
 func perform(h http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, "http://127.0.0.1:7788"+path, strings.NewReader(body))
@@ -172,7 +187,7 @@ func TestRoutesAndSafeReadViews(t *testing.T) {
 				t.Fatal("secret leaked")
 			}
 			if path == "/" || path == "/index.html" {
-				if !strings.Contains(r.Body.String(), token) || strings.Contains(r.Body.String(), "__LC_TOKEN__") {
+				if !strings.Contains(r.Body.String(), token) {
 					t.Fatal("token not injected")
 				}
 			}
@@ -238,7 +253,12 @@ func TestSecurityMiddleware(t *testing.T) {
 	checkAPIError(t, rec, 403, "forbidden")
 	for _, path := range []string{"/", "/healthz", "/api/v1/overview", "/api/v1/missing"} {
 		r := perform(h, "GET", path, "", nil)
-		if r.Header().Get("Content-Security-Policy") != "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'" || r.Header().Get("X-Content-Type-Options") != "nosniff" || r.Header().Get("Referrer-Policy") != "no-referrer" || r.Header().Get("Cache-Control") != "no-store" {
+		policy := r.Header().Get("Content-Security-Policy")
+		if path == "/" {
+			// HTML pages additionally allow their own inline scripts by hash (TestHTMLPages).
+			policy = regexp.MustCompile(` 'sha256-[A-Za-z0-9+/=]+'`).ReplaceAllString(policy, "")
+		}
+		if policy != "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'" || r.Header().Get("X-Content-Type-Options") != "nosniff" || r.Header().Get("Referrer-Policy") != "no-referrer" || r.Header().Get("Cache-Control") != "no-store" {
 			t.Fatal("security headers missing", r.Header())
 		}
 		if r.Header().Get("Access-Control-Allow-Origin") != "" {
@@ -251,6 +271,47 @@ func TestSecurityMiddleware(t *testing.T) {
 	hdr["Content-Type"] = "application/json; charset=utf-8"
 	checkStatus(t, perform(h, "POST", path, body, hdr), 202)
 }
+func TestHTMLPages(t *testing.T) {
+	_, _, _, h, token := apiFixture(t)
+	hash := func(script string) string {
+		sum := sha256.Sum256([]byte(script))
+		return "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	}
+	for path, name := range map[string]string{"/": "index", "/index.html": "index", "/board": "board", "/board/": "board", "/board/index.html": "board", "/board/?project=demo": "board"} {
+		t.Run(path, func(t *testing.T) {
+			r := perform(h, "GET", path, "", nil)
+			checkStatus(t, r, 200)
+			body := r.Body.String()
+			if r.Header().Get("Content-Type") != "text/html; charset=utf-8" {
+				t.Fatal(r.Header())
+			}
+			// The token is the first element of <head> and appears exactly once.
+			if !strings.Contains(body, `<head><meta name="lc-token" content="`+token+`">`) || strings.Count(body, token) != 1 {
+				t.Fatal("token not injected into <head>", body)
+			}
+			if !strings.Contains(body, "self.p='"+name+"'") {
+				t.Fatal("wrong page", body)
+			}
+			want := "default-src 'self'; script-src 'self' " + hash("self.p='"+name+"'") + " " + hash("self.r=1") + "; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+			if got := r.Header().Get("Content-Security-Policy"); got != want {
+				t.Fatalf("CSP\n got %s\nwant %s", got, want)
+			}
+		})
+	}
+	// HEAD is answered for pages and assets (Next.js prefetch probe), never for the API.
+	for _, path := range []string{"/", "/board/", "/app.js"} {
+		checkStatus(t, perform(h, "HEAD", path, "", nil), 200)
+	}
+	checkAPIError(t, perform(h, "HEAD", "/api/v1/overview", "", nil), 405, "method_not_allowed")
+	checkAPIError(t, perform(h, "POST", "/board/", "{}", writeHeaders(token)), 405, "method_not_allowed")
+	// Assets keep the strict base policy without page hashes.
+	if got := perform(h, "GET", "/app.js", "", nil).Header().Get("Content-Security-Policy"); strings.Contains(got, "sha256") {
+		t.Fatal(got)
+	}
+	if got := scriptHashes([]byte(`<script src="/a.js"></script><SCRIPT type="x">a</SCRIPT><script>a</script>`)); got != " "+hash("a") {
+		t.Fatalf("scriptHashes = %q", got)
+	}
+}
 func TestAPIValidationAndErrors(t *testing.T) {
 	_, f, _, h, token := apiFixture(t)
 	headers := writeHeaders(token)
@@ -260,7 +321,7 @@ func TestAPIValidationAndErrors(t *testing.T) {
 	}
 	checkAPIError(t, perform(h, "POST", path, `{"text":"`+strings.Repeat("x", 16<<10)+`"}`, headers), 413, "body_too_large")
 	checkAPIError(t, perform(h, "POST", "/api/v1/answers/demo/a1/retry", `{"text":"`+strings.Repeat("x", 16<<10)+`"}`, headers), 413, "body_too_large")
-	for _, path := range []string{"/api/v1/missing", "/missing.js", "/dir/", "/api/v1/tasks/demo/missing", "/api/v1/tasks/missing/task", "/api/v1/tasks/demo/task/reports/missing"} {
+	for _, path := range []string{"/api/v1/missing", "/missing.js", "/dir/", "/missing-page", "/missing.html", "/dir/file.html", "/api/v1/tasks/demo/missing", "/api/v1/tasks/missing/task", "/api/v1/tasks/demo/task/reports/missing"} {
 		checkAPIError(t, perform(h, "GET", path, "", nil), 404, "not_found")
 	}
 	for _, path := range []string{"/api/v1/tasks?column=bad", "/api/v1/decisions?state=bad", "/api/v1/tasks/demo/task/terminal?lines=x", "/api/v1/tasks/demo/task/terminal?lines=-1", "/api/v1/tasks/demo/task/terminal?source=other"} {

@@ -88,6 +88,7 @@ export function DecisionsView() {
             {hints.map((x) => (
               <Link
                 key={`${x.project}/${x.task_id}`}
+                prefetch={false}
                 href={taskHref(x.project, x.task_id)}
                 className="group flex items-start gap-3 px-5 py-3 text-[13.5px] hover:bg-surface-2/60"
               >

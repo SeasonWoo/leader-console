@@ -3,7 +3,9 @@ package server
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,8 +16,12 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"path"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -34,6 +40,7 @@ type Options struct{ Addr string }
 type handler struct {
 	svc       *service.Service
 	static    fs.FS
+	pageCSP   sync.Map // HTML 页面路径 → CSP（内联脚本哈希）；嵌入的静态文件不变，可永久缓存
 	token     string
 	port      string
 	started   time.Time
@@ -118,14 +125,17 @@ func (h *handler) routes() http.Handler {
 	}))
 	mux.HandleFunc("/api/v1/stream", h.only("GET", h.stream))
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { apiError(w, 404, "not_found", "Resource not found") })
-	mux.HandleFunc("/", h.only("GET", h.assets))
+	// Pages and assets also answer HEAD: the Next.js router probes page URLs with HEAD before prefetching.
+	mux.HandleFunc("/", h.only("GET, HEAD", h.assets))
 	return h.security(mux)
 }
 
-func (h *handler) only(method string, next http.HandlerFunc) http.HandlerFunc {
+// only accepts the listed methods ("GET" or a comma-separated list such as "GET, HEAD").
+func (h *handler) only(methods string, next http.HandlerFunc) http.HandlerFunc {
+	allowed := strings.Split(methods, ", ")
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != method {
-			w.Header().Set("Allow", method)
+		if !slices.Contains(allowed, r.Method) {
+			w.Header().Set("Allow", methods)
 			apiError(w, 405, "method_not_allowed", "Method not allowed")
 			return
 		}
@@ -134,7 +144,7 @@ func (h *handler) only(method string, next http.HandlerFunc) http.HandlerFunc {
 }
 func (h *handler) security(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Content-Security-Policy", csp(""))
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -209,24 +219,18 @@ func (h *handler) assets(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 404, "not_found", "Page not found")
 		return
 	}
-	// Serve index directly, including /index.html, to avoid FileServer's redirect
-	// bypassing token injection. All other assets must be actual embedded files.
-	if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-		data, err := fs.ReadFile(h.static, "index.html")
-		if err != nil {
-			apiError(w, 404, "not_found", "Page not found")
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, strings.ReplaceAll(string(data), "__LC_TOKEN__", html.EscapeString(h.token)))
+	// HTML pages always go through serveHTML (token injection + per-page CSP), including
+	// direct *.html requests, so FileServer can never serve a page without them.
+	if page, ok := h.htmlPage(r.URL.Path); ok {
+		h.serveHTML(w, page)
 		return
 	}
-	path := strings.TrimPrefix(r.URL.Path, "/")
-	if !fs.ValidPath(path) {
+	name := strings.TrimPrefix(r.URL.Path, "/")
+	if !fs.ValidPath(name) || strings.HasSuffix(name, ".html") {
 		apiError(w, 404, "not_found", "Asset not found")
 		return
 	}
-	info, err := fs.Stat(h.static, path)
+	info, err := fs.Stat(h.static, name)
 	if err != nil || info.IsDir() {
 		apiError(w, 404, "not_found", "Asset not found")
 		return
@@ -235,6 +239,85 @@ func (h *handler) assets(w http.ResponseWriter, r *http.Request) {
 	// directories to browsing. Missing-file errors have already been normalized.
 	http.FileServerFS(h.static).ServeHTTP(w, r)
 }
+
+// htmlPage maps a URL path to an exported page: "/" → index.html, "/board" and
+// "/board/" → board/index.html (Next.js static export with trailingSlash), "/x.html" → x.html.
+func (h *handler) htmlPage(urlPath string) (string, bool) {
+	p := strings.Trim(urlPath, "/")
+	var candidates []string
+	switch {
+	case p == "":
+		candidates = []string{"index.html"}
+	case strings.HasSuffix(p, ".html"):
+		candidates = []string{p}
+	case path.Ext(p) == "":
+		candidates = []string{p + "/index.html", p + ".html"}
+	}
+	for _, c := range candidates {
+		if !fs.ValidPath(c) {
+			continue
+		}
+		if info, err := fs.Stat(h.static, c); err == nil && !info.IsDir() {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+var (
+	headTag      = regexp.MustCompile(`(?i)<head(?:\s[^>]*)?>`)
+	inlineScript = regexp.MustCompile(`(?is)<script\b([^>]*)>(.*?)</script\s*>`)
+	srcAttr      = regexp.MustCompile(`(?i)\ssrc\s*=`)
+)
+
+// serveHTML injects the write token as the first element of <head> (cross-origin pages
+// cannot read same-origin HTML) and allows exactly the page's own inline scripts by hash.
+func (h *handler) serveHTML(w http.ResponseWriter, page string) {
+	data, err := fs.ReadFile(h.static, page)
+	if err != nil {
+		apiError(w, 404, "not_found", "Page not found")
+		return
+	}
+	policy, ok := h.pageCSP.Load(page)
+	if !ok {
+		policy, _ = h.pageCSP.LoadOrStore(page, csp(scriptHashes(data)))
+	}
+	doc := string(data)
+	meta := `<meta name="lc-token" content="` + html.EscapeString(h.token) + `">`
+	if loc := headTag.FindStringIndex(doc); loc != nil {
+		doc = doc[:loc[1]] + meta + doc[loc[1]:]
+	} else {
+		doc = meta + doc
+	}
+	w.Header().Set("Content-Security-Policy", policy.(string))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = io.WriteString(w, doc)
+}
+
+// scriptHashes returns " 'sha256-…'" sources for every inline <script> of a page.
+// Next.js static export inlines its bootstrap and RSC payload; hashing keeps
+// script-src free of 'unsafe-inline' (design §9).
+func scriptHashes(page []byte) string {
+	var b strings.Builder
+	seen := map[string]bool{}
+	for _, m := range inlineScript.FindAllSubmatch(page, -1) {
+		if srcAttr.Match(m[1]) {
+			continue
+		}
+		sum := sha256.Sum256(m[2])
+		src := " 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+		if !seen[src] {
+			seen[src] = true
+			b.WriteString(src)
+		}
+	}
+	return b.String()
+}
+
+func csp(extraScriptSrc string) string {
+	return "default-src 'self'; script-src 'self'" + extraScriptSrc + "; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+}
+
 func (h *handler) stream(w http.ResponseWriter, r *http.Request) {
 	if h.streams.Add(1) > 16 {
 		h.streams.Add(-1)

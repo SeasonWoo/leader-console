@@ -1,13 +1,15 @@
 "use client";
 
-// 全局状态：overview 快照、实时刷新（真实后端 SSE + 5s 轮询回退；demo 为 mock 推送）、时钟、toast。
+// 全局状态：overview 快照、实时刷新（SSE + 5s 轮询回退；mock 模式为模拟推送）、时钟、toast、旧 hash 链接跳转。
 // 根布局常驻，页面间切换不会断开订阅或丢失草稿。
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
 import { api, errorMessage, mockScenario } from "@/lib/api";
+import { legacyHashToPath } from "@/lib/legacy-route";
 import type { Overview, ProjectSummary } from "@/lib/types";
 
-export type LiveMode = "mock" | "sse" | "polling" | "offline";
+export type LiveMode = "connecting" | "mock" | "sse" | "polling" | "offline";
 export type ToastKind = "ok" | "warn" | "error" | "info";
 
 interface ToastState {
@@ -25,12 +27,16 @@ interface ConsoleCtx {
   /** 当前时间（mock 模式平移到数据时间附近），每 15s 更新 */
   now: number;
   live: LiveMode;
-  scenario: string;
+  /** null：真实后端；否则为 mock 场景名 */
+  scenario: string | null;
   refresh: () => Promise<void>;
   projectSummary: (name: string) => ProjectSummary | undefined;
   toast: (msg: string, kind?: ToastKind) => void;
   toastState: ToastState | null;
 }
+
+const POLL_MS = 5000;
+const SSE_RETRY_MS = 30_000;
 
 const Ctx = createContext<ConsoleCtx | null>(null);
 
@@ -47,7 +53,7 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
   const [offset, setOffset] = useState<number | null>(null);
   const [wall, setWall] = useState(() => Date.now());
   const [toastState, setToast] = useState<ToastState | null>(null);
-  const [scenario] = useState(() => mockScenario());
+  const scenario = mockScenario();
   const versionRef = useRef("");
   const inflight = useRef<Promise<void> | null>(null);
   const pending = useRef(false);
@@ -61,8 +67,8 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
       try {
         const ov = await api.overview();
         versionRef.current = ov.version;
-        // mock 数据时间固定在 generated_at 附近：只校准一次，倒计时才有意义。
-        setOffset((o) => (o === null ? Date.parse(ov.generated_at) - Date.now() : o));
+        // mock 数据时间固定在 generated_at 附近：只在 mock 模式校准一次，倒计时才有意义。
+        if (mockScenario()) setOffset((o) => (o === null ? Date.parse(ov.generated_at) - Date.now() : o));
         setOverview(ov);
         setError("");
         setEpoch((e) => e + 1);
@@ -79,18 +85,85 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // 旧前端的 #/board、#/task/<project>/<id> 等链接跳到新路由。
+  const router = useRouter();
+  useEffect(() => {
+    const to = legacyHashToPath(window.location.hash, window.location.search);
+    if (to) router.replace(to);
+  }, [router]);
+
+  const [live, setLive] = useState<LiveMode>(() => (mockScenario() ? "mock" : "connecting"));
+
+  // 实时：mock 模式订阅模拟推送；否则 SSE（/api/v1/stream 的 version 事件），断开时回退 5s 轮询并每 30s 重连。
   useEffect(() => {
     void refresh();
-    let unsub: (() => void) | undefined;
-    let cancelled = false;
-    void api.subscribe((v) => {
-      if (v !== versionRef.current) void refresh();
-    }).then((u) => (cancelled ? u() : (unsub = u)));
-    const t = setInterval(() => setWall(Date.now()), 15_000);
+    const tick = setInterval(() => setWall(Date.now()), 15_000);
+    const onVersion = (v: string) => {
+      if (v && v !== versionRef.current) void refresh();
+    };
+
+    if (mockScenario()) {
+      let unsub: (() => void) | undefined;
+      let cancelled = false;
+      void api.subscribeMock(onVersion).then((u) => (cancelled ? u() : (unsub = u)));
+      return () => {
+        cancelled = true;
+        unsub?.();
+        clearInterval(tick);
+      };
+    }
+
+    let es: EventSource | null = null;
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let closed = false;
+
+    const stopPolling = () => {
+      clearInterval(poll);
+      poll = undefined;
+    };
+    const startPolling = () => {
+      setLive("polling");
+      if (poll) return;
+      poll = setInterval(async () => {
+        try {
+          const ov = await api.overview();
+          setLive(es ? "sse" : "polling");
+          if (ov.version !== versionRef.current) void refresh();
+        } catch {
+          setLive("offline");
+        }
+      }, POLL_MS);
+    };
+    const connect = () => {
+      if (closed) return;
+      if (typeof EventSource === "undefined") return startPolling();
+      es = new EventSource("/api/v1/stream");
+      es.addEventListener("open", () => {
+        stopPolling();
+        setLive("sse");
+      });
+      es.addEventListener("version", (e) => {
+        try {
+          onVersion(JSON.parse((e as MessageEvent<string>).data).version);
+        } catch {
+          /* 忽略坏帧 */
+        }
+      });
+      es.addEventListener("error", () => {
+        es?.close();
+        es = null;
+        startPolling();
+        retry = setTimeout(connect, SSE_RETRY_MS);
+      });
+    };
+    connect();
     return () => {
-      cancelled = true;
-      unsub?.();
-      clearInterval(t);
+      closed = true;
+      es?.close();
+      stopPolling();
+      clearTimeout(retry);
+      clearInterval(tick);
     };
   }, [refresh]);
 
@@ -119,14 +192,14 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
       error,
       epoch,
       now: wall + (offset ?? 0),
-      live: "mock",
+      live,
       scenario,
       refresh,
       projectSummary: (name) => overview?.projects.find((p) => p.name === name),
       toast,
       toastState,
     }),
-    [overview, error, epoch, wall, offset, scenario, refresh, toast, toastState],
+    [overview, error, epoch, wall, offset, live, scenario, refresh, toast, toastState],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
