@@ -328,6 +328,7 @@ Go：`model.AnswerLine`（磁盘行）、`model.Answer`（折叠后）。
 视图推导（service 负责）：
 - 看板列：见 PRD §8；`TaskLive.Lost` 为真的进行中任务列为 `blocked`。
 - 决策排序：`state=open` 优先；`urgency` high > normal > low；`deadline` 升序（无 deadline 排后）；`created_at` 升序。
+- 看板排序：service 快照中的任务按 `updated_at` 倒序（零值回退 `created_at`）；时间相同按 `id` 升序，跨项目同 ID 再按项目名升序。前端分列与项目/列筛选保留该顺序；已完成列的最近 24h 筛选也使用相同时间回退。
 - `RunningFor`：非终态任务 = now − (StartedAt ?? CreatedAt)；终态 = 0。
 
 ## 7. 决策回传状态机

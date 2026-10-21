@@ -140,6 +140,28 @@ func sortDecisions(ds []model.DecisionView) {
 		return a.Decision.ID < b.Decision.ID
 	})
 }
+func taskUpdatedAt(t model.Task) time.Time {
+	if t.UpdatedAt.IsZero() {
+		return t.CreatedAt
+	}
+	return t.UpdatedAt
+}
+
+// The board preserves API order when grouping cards into columns.
+func sortTasks(tasks []model.TaskView) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		a, b := tasks[i], tasks[j]
+		at, bt := taskUpdatedAt(a.Task), taskUpdatedAt(b.Task)
+		if !at.Equal(bt) {
+			return at.After(bt)
+		}
+		if a.Task.ID != b.Task.ID {
+			return a.Task.ID < b.Task.ID
+		}
+		return a.Project < b.Project
+	})
+}
+
 func (s *Service) taskView(project string, t model.Task, live model.TaskLive, source model.DataSource, now time.Time) model.TaskView {
 	col := model.ColumnInProgress
 	switch t.Status {

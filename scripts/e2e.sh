@@ -64,6 +64,16 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 leader_json=$TMP/root/$PROJECT/leader.json
 sed "s/\"heartbeat_at\": *\"[^\"]*\"/\"heartbeat_at\": \"$now\"/" "$leader_json" >"$leader_json.new"
 mv "$leader_json.new" "$leader_json"
+# Intentionally unordered completed tasks exercise the real store/service/API path.
+state_json=$TMP/root/$PROJECT/state.json
+jq --arg now "$now" '.tasks += [
+  {id:"sort-b", name:"sort-b", status:"done", updated_at:"2020-01-01T00:00:00Z"},
+  {id:"sort-new", name:"sort-new", status:"done", updated_at:$now},
+  {id:"sort-old", name:"sort-old", status:"done", updated_at:"2019-01-01T00:00:00Z", created_at:$now},
+  {id:"sort-fallback", name:"sort-fallback", status:"done", created_at:"2021-01-01T00:00:00Z"},
+  {id:"sort-a", name:"sort-a", status:"done", updated_at:"2020-01-01T08:00:00+08:00"}
+]' "$state_json" >"$state_json.new"
+mv "$state_json.new" "$state_json"
 
 step "启动 ${BIN}（${ADDR}，假 herdr）"
 XDG_STATE_HOME=$TMP/state FAKE_HERDR_LOG=$TMP/herdr.log \
@@ -80,6 +90,13 @@ ov=$(overview)
 	fail "demo leader 不在线：$(printf '%s' "$ov" | jq -c '.projects[] | select(.name=="demo") | .leader')"
 [ "$(printf '%s' "$ov" | jq -r '.projects[] | select(.name=="legacy-demo") | .source')" = "ledger.md" ] || fail "legacy-demo 不是 ledger.md 来源"
 state_is open || fail "$DECISION 初始状态不是 open：$(decision_state)"
+
+step "看板排序：更新时间倒序、创建时间回退、同时间按 ID（含筛选）"
+for query in '' '?project=demo' '?column=done' '?project=demo&column=done'; do
+	order=$(curl -fsS "$BASE/api/v1/tasks$query" | jq -r \
+		'[.tasks[] | select(.task.id | startswith("sort-")) | .task.id] | join(",")')
+	[ "$order" = 'sort-new,sort-fallback,sort-a,sort-b,sort-old' ] || fail "排序不符（$query）：$order"
+done
 
 step "详情 / 报告 / 终端：渲染与脱敏已接线"
 detail=$(curl -fsS "$BASE/api/v1/tasks/$PROJECT/uih-copilot")

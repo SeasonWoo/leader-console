@@ -53,7 +53,7 @@ export function create(root, route, ctx) {
         let list = byCol[col];
         const head = h("div", { class: "colhead" }, h("span", { text: `${label} (${list.length})` }));
         if (col === "done") {
-          const recent = list.filter((t) => (parseTime(t.task.updated_at) || 0) >= now - DAY);
+          const recent = list.filter((t) => (parseTime(t.task.updated_at) ?? parseTime(t.task.created_at) ?? 0) >= now - DAY);
           const hidden = list.length - recent.length;
           if (!showAllDone) list = recent;
           if (hidden > 0 || showAllDone) {

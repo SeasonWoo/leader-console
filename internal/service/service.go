@@ -345,6 +345,7 @@ func (s *Service) publishLocked() {
 		}
 		out.overview.Projects = append(out.overview.Projects, summary)
 	}
+	sortTasks(out.tasks)
 	sortDecisions(out.decisions)
 	sortDecisions(out.overview.Decisions)
 	// Hash semantic content, not volatile generation/check timestamps. Include raw
