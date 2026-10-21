@@ -1,0 +1,171 @@
+"use client";
+
+// 全局状态：overview 快照、实时刷新（真实后端 SSE + 5s 轮询回退；demo 为 mock 推送）、时钟、toast。
+// 根布局常驻，页面间切换不会断开订阅或丢失草稿。
+
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { api, errorMessage, mockScenario } from "@/lib/api";
+import type { Overview, ProjectSummary } from "@/lib/types";
+
+export type LiveMode = "mock" | "sse" | "polling" | "offline";
+export type ToastKind = "ok" | "warn" | "error" | "info";
+
+interface ToastState {
+  id: number;
+  msg: string;
+  kind: ToastKind;
+}
+
+interface ConsoleCtx {
+  overview: Overview | null;
+  /** overview 拉取失败的提示；成功后清空 */
+  error: string;
+  /** 每次成功刷新 +1，页面据此重新拉自己的数据 */
+  epoch: number;
+  /** 当前时间（mock 模式平移到数据时间附近），每 15s 更新 */
+  now: number;
+  live: LiveMode;
+  scenario: string;
+  refresh: () => Promise<void>;
+  projectSummary: (name: string) => ProjectSummary | undefined;
+  toast: (msg: string, kind?: ToastKind) => void;
+  toastState: ToastState | null;
+}
+
+const Ctx = createContext<ConsoleCtx | null>(null);
+
+export function useConsole() {
+  const c = useContext(Ctx);
+  if (!c) throw new Error("useConsole must be used inside ConsoleProvider");
+  return c;
+}
+
+export function ConsoleProvider({ children }: { children: ReactNode }) {
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [error, setError] = useState("");
+  const [epoch, setEpoch] = useState(0);
+  const [offset, setOffset] = useState<number | null>(null);
+  const [wall, setWall] = useState(() => Date.now());
+  const [toastState, setToast] = useState<ToastState | null>(null);
+  const [scenario] = useState(() => mockScenario());
+  const versionRef = useRef("");
+  const inflight = useRef<Promise<void> | null>(null);
+  const pending = useRef(false);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    if (inflight.current) {
+      pending.current = true;
+      return inflight.current;
+    }
+    inflight.current = (async () => {
+      try {
+        const ov = await api.overview();
+        versionRef.current = ov.version;
+        // mock 数据时间固定在 generated_at 附近：只校准一次，倒计时才有意义。
+        setOffset((o) => (o === null ? Date.parse(ov.generated_at) - Date.now() : o));
+        setOverview(ov);
+        setError("");
+        setEpoch((e) => e + 1);
+      } catch (e) {
+        setError(`数据加载失败：${errorMessage(e)}`);
+      }
+      setWall(Date.now());
+    })();
+    await inflight.current;
+    inflight.current = null;
+    if (pending.current) {
+      pending.current = false;
+      void refresh();
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    let unsub: (() => void) | undefined;
+    let cancelled = false;
+    void api.subscribe((v) => {
+      if (v !== versionRef.current) void refresh();
+    }).then((u) => (cancelled ? u() : (unsub = u)));
+    const t = setInterval(() => setWall(Date.now()), 15_000);
+    return () => {
+      cancelled = true;
+      unsub?.();
+      clearInterval(t);
+    };
+  }, [refresh]);
+
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const toast = useCallback((msg: string, kind: ToastKind = "info") => {
+    setToast({ id: Date.now(), msg, kind });
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setToast(null), 4000);
+  }, []);
+
+  useEffect(() => {
+    const onRejection = (e: PromiseRejectionEvent) => toast(errorMessage(e.reason), "error");
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => window.removeEventListener("unhandledrejection", onRejection);
+  }, [toast]);
+
+  // 浏览器标题显示待回答数。
+  const openCount = overview ? overview.decisions.filter((d) => d.state === "open").length : 0;
+  useEffect(() => {
+    document.title = overview ? `(${openCount}) leader-console` : "leader-console";
+  }, [overview, openCount]);
+
+  const value = useMemo<ConsoleCtx>(
+    () => ({
+      overview,
+      error,
+      epoch,
+      now: wall + (offset ?? 0),
+      live: "mock",
+      scenario,
+      refresh,
+      projectSummary: (name) => overview?.projects.find((p) => p.name === name),
+      toast,
+      toastState,
+    }),
+    [overview, error, epoch, wall, offset, scenario, refresh, toast, toastState],
+  );
+
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+}
+
+/** 页面级数据：首次挂载与每次全局刷新（epoch 变化）时重新拉取；保留上一次成功的数据，避免闪烁。 */
+export function useResource<T>(fetcher: () => Promise<T>, deps: unknown[]) {
+  const { epoch } = useConsole();
+  const key = JSON.stringify(deps);
+  const [state, setState] = useState<{ key: string; data: T | null; error: unknown; loading: boolean }>({
+    key,
+    data: null,
+    error: null,
+    loading: true,
+  });
+  const [nonce, setNonce] = useState(0);
+  const fn = useRef(fetcher);
+  useEffect(() => {
+    fn.current = fetcher;
+  });
+
+  useEffect(() => {
+    let alive = true;
+    fn.current().then(
+      (data) => alive && setState({ key, data, error: null, loading: false }),
+      (error) =>
+        alive && setState((s) => ({ key, data: s.key === key ? s.data : null, error, loading: false })),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [epoch, nonce, key]);
+
+  const reload = useCallback(() => {
+    setState((s) => ({ ...s, loading: true }));
+    setNonce((n) => n + 1);
+  }, []);
+
+  // 参数变了（例如切到另一个任务）就不再展示旧数据。
+  if (state.key !== key) return { data: null, error: null, loading: true, reload };
+  return { data: state.data, error: state.error, loading: state.loading, reload };
+}

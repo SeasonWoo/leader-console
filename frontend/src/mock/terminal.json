@@ -1,0 +1,14 @@
+{
+  "demo/uih-copilot": {
+    "visible": {"text": "● 评审通过，等待 leader 授权提交\n  git status: clean\n  token=ghp_****\n> ", "agent_status": "done", "fetched_at": "2026-10-21T16:02:00+08:00"},
+    "recent": {"text": "$ go test ./...\nok  \tcopilot/internal/header\t0.412s\nok  \tcopilot/internal/proxy\t1.020s\n● 正在跑单测\n  token=ghp_****\n● 评审通过，等待 leader 授权提交\n  <script>alert(1)</script> ← 终端里的 HTML 按纯文本显示", "agent_status": "done", "fetched_at": "2026-10-21T16:02:00+08:00"}
+  },
+  "demo/uih-fe": {
+    "visible": {"text": "◐ 补保存期间禁用复选框\n  editing src/pages/Settings.tsx", "agent_status": "working", "fetched_at": "2026-10-21T16:02:00+08:00"},
+    "recent": {"text": "$ pnpm test settings\n  ✓ disables checkbox while saving (32ms)\n  ✓ restores state on error (18ms)\n◐ 补保存期间禁用复选框\n  editing src/pages/Settings.tsx", "agent_status": "working", "fetched_at": "2026-10-21T16:02:00+08:00"}
+  },
+  "legacy-demo/bits-qa": {
+    "visible": {"text": "等待用户确认提交\n> ", "agent_status": "idle", "fetched_at": "2026-10-21T16:02:00+08:00"},
+    "recent": {"text": "已修改 SKILL.md\n等待用户确认提交\n> ", "agent_status": "idle", "fetched_at": "2026-10-21T16:02:00+08:00"}
+  }
+}

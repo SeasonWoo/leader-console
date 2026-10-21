@@ -1,0 +1,93 @@
+{
+  "demo/uih-copilot": {
+    "project": "demo",
+    "task": {
+      "id": "uih-copilot", "name": "uih-copilot", "kind": "codex", "role": "impl",
+      "agent_name": "uih-copilot", "pane_id": "w1:pP",
+      "repo": "copilot_marscode", "branch": "feat/user-identity-header",
+      "worktree": "/Users/me/.herdr/worktrees/copilot_marscode/feat-uih",
+      "goal": "copilot 侧 header 生效范围", "status": "ready_to_merge",
+      "result_summary": "评审可提交；2 条补测试建议已处理；等用户授权提交和提 MR",
+      "reports": ["reports/uih-copilot/report.md", "reports/uih-copilot/review-rv-copilot.md"],
+      "links": [{"type": "mr", "title": "MR !6600", "url": "https://code.example.com/mr/6600"}, {"type": "lark_doc", "title": "方案文档（无链接）"}],
+      "rework_count": 1,
+      "created_at": "2026-10-21T14:45:00+08:00", "updated_at": "2026-10-21T15:55:00+08:00", "started_at": "2026-10-21T14:46:00+08:00"
+    },
+    "column": "to_merge",
+    "live": {"agent_found": true, "agent_status": "done", "activity": "✳ 等待授权提交", "lost": false},
+    "running_for_sec": 4560,
+    "events": [
+      {"ts": "2026-10-21T15:55:00+08:00", "type": "decision_opened", "actor": "leader", "task_id": "uih-copilot", "decision_id": "d-20261021-001", "summary": "是否授权提交并提 MR"},
+      {"ts": "2026-10-21T15:50:00+08:00", "type": "report_written", "actor": "uih-copilot", "task_id": "uih-copilot", "summary": "reports/uih-copilot/report.md"},
+      {"ts": "2026-10-21T15:45:00+08:00", "type": "review_passed", "actor": "rv-copilot", "task_id": "uih-copilot", "summary": "可提交；2 条补测试建议"},
+      {"ts": "2026-10-21T15:30:00+08:00", "type": "rework", "actor": "leader", "task_id": "uih-copilot", "summary": "第 1 次返工：补空 header 与超长 header 测试"},
+      {"ts": "2026-10-21T15:20:00+08:00", "type": "review_requested", "actor": "leader", "task_id": "uih-copilot", "summary": "派 rv-copilot 交叉评审"},
+      {"ts": "2026-10-21T14:46:00+08:00", "type": "started", "actor": "uih-copilot", "task_id": "uih-copilot", "summary": "开工"},
+      {"ts": "2026-10-21T14:45:00+08:00", "type": "dispatched", "actor": "leader", "task_id": "uih-copilot", "summary": "派发给 codex（w1:pP）"}
+    ],
+    "reports": [
+      {"id": "report.md", "title": "report.md", "size": 1830},
+      {"id": "review-rv-copilot.md", "title": "review-rv-copilot.md", "size": 1048576}
+    ],
+    "decisions": []
+  },
+  "demo/uih-fe": {
+    "project": "demo",
+    "task": {
+      "id": "uih-fe", "name": "uih-fe", "kind": "claude", "role": "impl",
+      "agent_name": "uih-fe", "pane_id": "w1:pR",
+      "goal": "前端阶段一", "status": "working",
+      "created_at": "2026-10-21T14:45:00+08:00", "updated_at": "2026-10-21T15:50:00+08:00", "started_at": "2026-10-21T14:47:00+08:00"
+    },
+    "column": "in_progress",
+    "live": {"agent_found": true, "agent_status": "working", "activity": "◐ 补保存期间禁用复选框", "lost": false},
+    "running_for_sec": 4500,
+    "events": [
+      {"ts": "2026-10-21T16:00:40+08:00", "type": "decision_executing", "actor": "leader", "task_id": "uih-fe", "decision_id": "d-20261021-002", "answer_id": "a-20261021-160012-7f3c", "summary": "已通知 uih-fe 用 mock 开工阶段二"},
+      {"ts": "2026-10-21T16:00:20+08:00", "type": "decision_ack", "actor": "leader", "task_id": "uih-fe", "decision_id": "d-20261021-002", "answer_id": "a-20261021-160012-7f3c", "summary": "收到：B 先用 mock 开工"},
+      {"ts": "2026-10-21T15:56:00+08:00", "type": "decision_opened", "actor": "leader", "task_id": "uih-fe", "decision_id": "d-20261021-002", "summary": "阶段二是否等 BAM"},
+      {"ts": "2026-10-21T15:20:00+08:00", "type": "progress", "actor": "uih-fe", "task_id": "uih-fe", "summary": "阶段一完成 60%", "data": {"percent": 60}},
+      {"ts": "2026-10-21T14:47:00+08:00", "type": "started", "actor": "uih-fe", "task_id": "uih-fe", "summary": "开工"},
+      {"ts": "2026-10-21T14:45:00+08:00", "type": "dispatched", "actor": "leader", "task_id": "uih-fe", "summary": "派发给 claude（w1:pR）"}
+    ],
+    "reports": [],
+    "decisions": []
+  },
+  "tob-x/panic-fix": {
+    "project": "tob-x",
+    "task": {
+      "id": "panic-fix", "name": "panic-fix", "kind": "codex", "role": "impl",
+      "agent_name": "panic-fix", "pane_id": "w3:p4",
+      "branch": "fix/panic-nil-balance",
+      "goal": "修复余额为空时的 panic", "status": "working",
+      "created_at": "2026-10-21T11:00:00+08:00", "updated_at": "2026-10-21T11:55:00+08:00", "started_at": "2026-10-21T11:01:00+08:00"
+    },
+    "column": "blocked",
+    "live": {"agent_found": false, "lost": true},
+    "running_for_sec": 18060,
+    "events": [
+      {"ts": "2026-10-21T15:30:00+08:00", "type": "decision_opened", "actor": "leader", "task_id": "panic-fix", "decision_id": "d-20261021-102", "summary": "worker 丢失，是否改派"},
+      {"ts": "2026-10-21T11:55:00+08:00", "type": "progress", "actor": "panic-fix", "task_id": "panic-fix", "summary": "定位到 balance 为 nil 的分支"},
+      {"ts": "2026-10-21T11:01:00+08:00", "type": "started", "actor": "panic-fix", "task_id": "panic-fix", "summary": "开工"},
+      {"ts": "2026-10-21T11:00:00+08:00", "type": "dispatched", "actor": "leader", "task_id": "panic-fix", "summary": "派发给 codex（w3:p4）"}
+    ],
+    "reports": [],
+    "decisions": []
+  },
+  "legacy-demo/bits-qa": {
+    "project": "legacy-demo",
+    "task": {
+      "id": "bits-qa", "name": "bits-qa", "kind": "codex", "pane_id": "wP:p1",
+      "branch": "fix-bits-qa", "goal": "QA 默认不填", "status": "done",
+      "result_summary": "/tmp/bits-qa.md：只改了 SKILL.md；等用户确认提交",
+      "reports": ["/tmp/bits-qa.md"],
+      "created_at": "0001-01-01T00:00:00Z", "updated_at": "2026-10-20T23:15:00+08:00"
+    },
+    "column": "to_merge",
+    "live": {"agent_found": true, "agent_status": "idle", "activity": "等待用户确认", "lost": false},
+    "running_for_sec": 0,
+    "events": [],
+    "reports": [{"id": "r-3f9a1c2b7d", "title": "bits-qa.md", "size": 412}],
+    "decisions": []
+  }
+}

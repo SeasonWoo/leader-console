@@ -1,0 +1,284 @@
+@import "tailwindcss";
+
+/*
+ * 设计令牌：中性灰阶 + 唯一强调色（系统蓝）。语义色（红 / 橙 / 绿）只用于小圆点、胶囊文字和细描边，不做大面积色块。
+ * 跟随系统浅色 / 深色；demo 额外支持 html[data-theme] 手动切换以便对比。
+ */
+:root {
+  color-scheme: light;
+  --bg: #f5f5f7;
+  --surface: #ffffff;
+  --surface-2: #f5f5f7;
+  --surface-3: #ebebf0;
+  --fg: #1d1d1f;
+  --fg-2: #424245;
+  --muted: #6e6e73;
+  --faint: #86868b;
+  --line: rgb(0 0 0 / 0.08);
+  --line-strong: rgb(0 0 0 / 0.14);
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(0 113 227 / 0.09);
+  --red: #d70015;
+  --orange: #b25000;
+  --green: #248a3d;
+  --glass: rgb(250 250 252 / 0.72);
+  --term-bg: #1d1d1f;
+  --term-fg: #e8e8ed;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.04), 0 1px 1px rgb(0 0 0 / 0.02);
+  --shadow-pop: 0 8px 30px rgb(0 0 0 / 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #000000;
+    --surface: #1c1c1e;
+    --surface-2: #2c2c2e;
+    --surface-3: #3a3a3c;
+    --fg: #f5f5f7;
+    --fg-2: #d1d1d6;
+    --muted: #a1a1a6;
+    --faint: #8e8e93;
+    --line: rgb(255 255 255 / 0.1);
+    --line-strong: rgb(255 255 255 / 0.16);
+    --accent: #0a84ff;
+    --accent-hover: #409cff;
+    --accent-fg: #ffffff;
+    --accent-soft: rgb(10 132 255 / 0.16);
+    --red: #ff453a;
+    --orange: #ff9f0a;
+    --green: #30d158;
+    --glass: rgb(22 22 23 / 0.72);
+    --term-bg: #0b0b0c;
+    --term-fg: #e8e8ed;
+    --shadow-card: 0 0 0 1px rgb(255 255 255 / 0.02);
+    --shadow-pop: 0 8px 30px rgb(0 0 0 / 0.6);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --surface: #1c1c1e;
+  --surface-2: #2c2c2e;
+  --surface-3: #3a3a3c;
+  --fg: #f5f5f7;
+  --fg-2: #d1d1d6;
+  --muted: #a1a1a6;
+  --faint: #8e8e93;
+  --line: rgb(255 255 255 / 0.1);
+  --line-strong: rgb(255 255 255 / 0.16);
+  --accent: #0a84ff;
+  --accent-hover: #409cff;
+  --accent-fg: #ffffff;
+  --accent-soft: rgb(10 132 255 / 0.16);
+  --red: #ff453a;
+  --orange: #ff9f0a;
+  --green: #30d158;
+  --glass: rgb(22 22 23 / 0.72);
+  --term-bg: #0b0b0c;
+  --term-fg: #e8e8ed;
+  --shadow-card: 0 0 0 1px rgb(255 255 255 / 0.02);
+  --shadow-pop: 0 8px 30px rgb(0 0 0 / 0.6);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-red: var(--red);
+  --color-orange: var(--orange);
+  --color-green: var(--green);
+  --color-glass: var(--glass);
+  --color-term-bg: var(--term-bg);
+  --color-term-fg: var(--term-fg);
+  --shadow-card: var(--shadow-card);
+  --shadow-pop: var(--shadow-pop);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Hiragino Sans GB",
+    "Helvetica Neue", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.5;
+    letter-spacing: -0.005em;
+  }
+  ::selection {
+    background: var(--accent-soft);
+  }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@keyframes lc-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.lc-fade-in {
+  animation: lc-fade-in 180ms ease-out both;
+}
+
+/* 服务端渲染的 Markdown（报告、决策背景）：只做排版，不引入 typography 插件。 */
+@layer components {
+  .prose-lc {
+    color: var(--fg-2);
+    font-size: 14px;
+    line-height: 1.7;
+    overflow-wrap: anywhere;
+  }
+  .prose-lc > :first-child {
+    margin-top: 0;
+  }
+  .prose-lc > :last-child {
+    margin-bottom: 0;
+  }
+  .prose-lc h1,
+  .prose-lc h2,
+  .prose-lc h3,
+  .prose-lc h4 {
+    color: var(--fg);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    line-height: 1.3;
+    margin: 1.6em 0 0.6em;
+  }
+  .prose-lc h1 {
+    font-size: 22px;
+  }
+  .prose-lc h2 {
+    font-size: 17px;
+  }
+  .prose-lc h3,
+  .prose-lc h4 {
+    font-size: 15px;
+  }
+  .prose-lc p,
+  .prose-lc ul,
+  .prose-lc ol,
+  .prose-lc pre,
+  .prose-lc table,
+  .prose-lc blockquote {
+    margin: 0.75em 0;
+  }
+  .prose-lc ul,
+  .prose-lc ol {
+    padding-left: 1.3em;
+  }
+  .prose-lc ul {
+    list-style: disc;
+  }
+  .prose-lc ol {
+    list-style: decimal;
+  }
+  .prose-lc li + li {
+    margin-top: 0.25em;
+  }
+  .prose-lc li::marker {
+    color: var(--faint);
+  }
+  .prose-lc a {
+    color: var(--accent);
+  }
+  .prose-lc a:hover {
+    text-decoration: underline;
+  }
+  .prose-lc strong {
+    color: var(--fg);
+    font-weight: 600;
+  }
+  .prose-lc code {
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+    background: var(--surface-2);
+    border-radius: 5px;
+    padding: 0.1em 0.35em;
+  }
+  .prose-lc pre {
+    background: var(--surface-2);
+    border-radius: 10px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .prose-lc pre code {
+    background: none;
+    padding: 0;
+    font-size: inherit;
+  }
+  .prose-lc blockquote {
+    border-left: 2px solid var(--line-strong);
+    padding-left: 12px;
+    color: var(--muted);
+  }
+  .prose-lc table {
+    display: block;
+    overflow-x: auto;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .prose-lc th,
+  .prose-lc td {
+    border-bottom: 1px solid var(--line);
+    padding: 7px 14px 7px 0;
+    text-align: left;
+    vertical-align: top;
+  }
+  .prose-lc th {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 12px;
+  }
+  .prose-lc hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    margin: 1.5em 0;
+  }
+}
