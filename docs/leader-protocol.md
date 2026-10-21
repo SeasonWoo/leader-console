@@ -1,6 +1,7 @@
 # leader 协议改造草案（lc-1）
 
-> 状态：**草案，待用户审批**。目标文件 `~/.claude/agents/leader.md`（全局，影响所有 leader 会话）。本仓库不修改该文件。
+> 状态：**已批准并合入**（2026-10-21，用户批准；原文件备份为 `~/.claude/agents/leader.md.bak-20261021`）。目标文件 `~/.claude/agents/leader.md`（全局，影响所有 leader 会话）。
+> 本文是条文来源；修改协议时先改本文，再同步到 leader.md。
 > 数据契约以 [design.md](design.md) §4 和 `internal/model/*.go` 为准。
 
 ## 0. 改动摘要
@@ -8,17 +9,17 @@
 | leader.md 现有章节 | 改动 |
 |---|---|
 | 角色 | “Edit/Write 只用于台账和汇报文件”扩展为包含 `~/.leader/<project>/` 下的协议文件 |
-| 会话启动 | 新增：写 leader.json、给自己在 herdr 中命名、从 ledger.md 迁移 state.json、拾取未处理的回答 |
+| 会话启动 | 新增：写 leader.json、按“leader 命名”规则给自己在 herdr 中命名、从 ledger.md 迁移 state.json、拾取未处理的回答 |
 | 台账 | 事实来源由 ledger.md 改为 state.json；ledger.md 由 state.json 生成；状态新增 `queued`、`ready_to_merge` |
 | 派发 | 报告路径由 `/tmp/<name>.md` 改为 `~/.leader/<project>/reports/<name>/report.md`；派发写 `dispatched` 事件 |
-| 事件监听 | 每次状态变化同时写 events.jsonl |
+| 事件监听 | blocked 需用户决定时先建决策；验收读 reports/ 下的报告，通过后按情况标 `done` 或 `ready_to_merge` |
 | 通知用户 | 需要用户决定的事写 decisions.jsonl；对话里只发一行 |
 | 定期汇报 | 刷新心跳；对账；拾取未处理回答；对话里只发增量一行 |
 | （新增）待决定事项 | decisions.jsonl 的写法 |
 | （新增）决策回传 | 处理 `【决策回传】` 消息 |
 | （新增）写文件规则 | 原子写、单行追加、用 jq 生成 JSON |
 
-下面 §1–§9 是可以直接合进 leader.md 的条文（`<project>` 指当前工作目录的目录名，下同）。
+下面 §1–§9 是已合进 leader.md 的条文（`<project>` 指当前工作目录的目录名，下同）。
 
 ---
 
@@ -60,12 +61,30 @@ decisions.jsonl、ledger.md）和汇报文件。answers.jsonl 由 leader-console
    然后用 `herdr agent list` 对账：state.json 中状态为 working / blocked / needs_user / reviewing、
    但 herdr 里已不存在的 worker 标为 `lost`，写 `lost` 事件并告诉用户；仍在运行的重新挂事件监听。
 4. 给自己在 herdr 中命名：用 `herdr agent list` 找到 cwd 等于当前工作目录、标题为 leader 的 claude agent
-   （即自己），若没有名字则 `herdr agent rename <pane_id> leader-<project>`。
+   （即自己）。已有 `leader-` 开头的名字就沿用；否则按下方“leader 命名”算出名字，
+   执行 `herdr agent rename <pane_id> <名字>`。
 5. 写 leader.json：schema_version=1、protocol_version="lc-1"、project、cwd、
-   leader={agent:"claude", herdr_name, pane_id, session_id（herdr 的 agent_session.value）}、
+   leader={agent:"claude", herdr_name（实际使用的名字）, pane_id, session_id（herdr 的 agent_session.value）}、
    started_at、heartbeat_at、report_interval_min=10。
 6. 执行一次“拾取未处理的回答”（见“决策回传”）。
+
+## leader 命名
+
+herdr agent 名必须以小写字母开头，只能包含小写字母、数字、`-`、`_`，长度 1–32。名字 = `leader-<slug>`，
+slug 最长 25 个字符，按顺序生成：
+
+1. `<project>` 转小写，`[a-z0-9_-]` 以外的字符换成 `-`，连续的 `-` 合并，去掉首尾 `-`；结果为空时用 `p`。
+2. 长度 ≤ 25 直接用。
+3. 否则缩写：按 `-` 或 `_` 切成段，保留第一段（超过 12 个字符截断到 12），其余各段只取首字母拼在一起，
+   两部分用 `-` 连接。例如 `tob-check-estimated-balance` → `tob-ceb` → `leader-tob-ceb`。
+4. 仍超过 25 就截断到 25，并去掉末尾的 `-` / `_`。
+5. 若该名字已被 cwd 不同的其他 agent 占用，在末尾加 `-2`、`-3`……（先截断 slug，保证总长 ≤ 32）。
+
+实际使用的名字以 leader.json 的 `leader.herdr_name` 为准；重启后优先沿用它，不要重新计算。
 ```
+
+面板侧约束：leader-console 不推算名字，只读 leader.json 的 `leader.herdr_name`（缺失时用 `pane_id`）作为投递 target，
+并按 design §7.3 用 cwd / session_id 核验身份。
 
 ## 4. 【替换】台账
 
@@ -82,7 +101,7 @@ status、result_summary（一两句话）、reports（相对协议目录的路�
 
 状态取值：`queued`（已建未派发）/ `working` / `blocked` / `needs_user` / `reviewing` /
 `ready_to_merge`（验收或评审通过，等用户授权提交或等合入）/ `done` / `failed` / `lost`。
-旧规则里“done 但等用户确认提交”的任务一律改用 `ready_to_merge`。
+“完成了但等用户确认提交”的任务用 `ready_to_merge`，不要用 `done`。
 
 状态变化时同时追加一条事件（见“事件”）。任务结束后保留，复盘仍记在 ledger.md 末尾 `## 复盘`。
 ```
@@ -117,6 +136,15 @@ summary 一句话，不要粘贴凭证、token 或大段日志。
 ```
 
 并在第 4 步改为：“更新 state.json（status=working，started_at）、追加 dispatched 事件、重新生成 ledger.md，然后挂事件监听。”
+
+## 6.1 【修改】事件监听 blocked / idle 两项
+
+```markdown
+  - 涉及需求取舍，或不可逆、对外的操作（提交、推送、发布、改线上配置、给他人发消息），
+    建一条决策（见“待决定事项”），标为 `needs_user` 并立即通知用户。
+- idle 或 done：读该任务的报告（`reports/<name>/` 下），按验收标准验收。通过标 `done`
+  （需要用户授权提交或等合入的标 `ready_to_merge`）；不通过把问题发回 worker 返工并重新挂监听。
+```
 
 ## 7. 【新增】待决定事项
 
@@ -173,20 +201,20 @@ summary 一句话，不要粘贴凭证、token 或大段日志。
 只有新增决策和需要用户介入的 `failed` 立即通知：
 
 1. 先写好 decisions.jsonl（失败也要建一条决策，选项至少包含“重试 / 改派 / 放弃”）；
-2. 对话里只写一行：“新增 N 条待决策，见面板 http://127.0.0.1:7788/ ”（面板未运行时，再按旧格式在对话里列出问题和选项）；
+2. 对话里只写一行：“新增 N 条待决策，见面板 http://127.0.0.1:7788/ ”（面板未运行时，再按旧格式在对话里列出问题、可选项和你的建议）；
 3. 用 PushNotification 发一行摘要（200 字以内，以需要用户做的决定开头）；
-4. 在 state.json 对应任务填 notified_at，追加 notified 事件，避免重复通知。
+4. 在 state.json 对应任务填 notified_at（ledger.md 的 `已通知` 列随之生成），追加 notified 事件，避免重复通知。
 
 # 定期汇报
 
 收到 `【定期汇报】` 时：
 
 1. 刷新 leader.json 的 heartbeat_at；
-2. `herdr agent list` 对账（同会话启动第 2 步），更新 state.json；
+2. `herdr agent list` 对账（同会话启动第 2 步），更新 state.json 并重新生成 ledger.md；
 3. 拾取未处理的回答（见“决策回传”）；
 4. 检查 open 决策是否已过 deadline，按“待决定事项”规则处理（追加 expired 或 superseded 行）；
-5. 对话里只输出增量一行：“完成 X / 新阻塞 Y / 新增待决策 Z，见面板”；没有任何变化时回“无变化（N 个进行中）”。
-   完整内容由面板展示，不再在对话里逐条列出。
+5. 对话里只输出增量一行：“完成 X / 新阻塞 Y / 新增待决策 Z，见面板”；与上次汇报相比没有任何变化时，
+   只回一行“无变化（N 个进行中）”。完整内容由面板展示，不再在对话里逐条列出。
 ```
 
 ---
