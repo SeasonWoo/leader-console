@@ -138,10 +138,10 @@ export function createMock(scenario: string) {
       view.decision.answer = { via: "chat", summary: "（mock）已在对话中处理", answered_at: iso() };
       recount(p);
       bump();
-      return fail(409, "already_answered", "该决策已被处理", { decision: clone(view) });
+      return fail(409, "already_answered", "该决策已被处理", { current: clone(view) });
     }
     if (view.state !== "open" || view.answer)
-      return fail(409, "already_answered", "该决策已有回答", { decision: clone(view) });
+      return fail(409, "already_answered", "该决策已有回答", { current: clone(view) });
     const option = (input.option || "").trim();
     const text = (input.text || "").trim();
     if (!option && !text) return fail(400, "invalid_answer", "请选择一个选项或填写说明");

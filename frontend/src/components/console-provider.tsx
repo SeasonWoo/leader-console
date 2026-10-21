@@ -85,11 +85,17 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // 旧前端的 #/board、#/task/<project>/<id> 等链接跳到新路由。
+  // 旧前端的 #/board、#/task/<project>/<id> 等链接跳到新路由：首次打开时转换一次，页面已打开时（点旧锚点、
+  // 切换旧书签、前进/后退）随 hashchange 再转换。不是 #/ 开头的 hash（如“跳到主要内容”的 #main）保持浏览器默认行为。
   const router = useRouter();
   useEffect(() => {
-    const to = legacyHashToPath(window.location.hash, window.location.search);
-    if (to) router.replace(to);
+    const convert = () => {
+      const to = legacyHashToPath(window.location.hash, window.location.search);
+      if (to) router.replace(to);
+    };
+    convert();
+    window.addEventListener("hashchange", convert);
+    return () => window.removeEventListener("hashchange", convert);
   }, [router]);
 
   const [live, setLive] = useState<LiveMode>(() => (mockScenario() ? "mock" : "connecting"));
@@ -205,7 +211,10 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
-/** 页面级数据：首次挂载与每次全局刷新（epoch 变化）时重新拉取；保留上一次成功的数据，避免闪烁。 */
+/**
+ * 页面级数据：首次挂载与每次全局刷新（epoch 变化）时重新拉取。
+ * 刷新失败时保留上一次成功的数据（避免闪烁），同时返回 error——调用方必须在有 error 时提示“可能是旧数据”并提供 reload。
+ */
 export function useResource<T>(fetcher: () => Promise<T>, deps: unknown[]) {
   const { epoch } = useConsole();
   const key = JSON.stringify(deps);

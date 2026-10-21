@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { FileText } from "lucide-react";
 import { useResource } from "@/components/console-provider";
 import { ServerHTML } from "@/components/server-html";
-import { Card, EmptyState, ErrorState, Segmented, SectionTitle, Skeleton } from "@/components/ui";
+import { Card, EmptyState, ErrorState, Segmented, SectionTitle, Skeleton, StaleNotice } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { fmtSize } from "@/lib/format";
 import { taskHref } from "@/lib/routes";
@@ -53,6 +53,9 @@ function ReportBody({ project, id, report }: { project: string; id: string; repo
     );
   return (
     <>
+      {res.error ? (
+        <StaleNotice className="mb-4" message={`报告刷新失败：${errorMessage(res.error)}`} onRetry={res.reload} retrying={res.loading} />
+      ) : null}
       {res.data.truncated && <p className="mb-4 rounded-lg bg-surface-2 px-3 py-2 text-[12.5px] text-muted">报告过大，已截断显示。</p>}
       <ServerHTML html={res.data.html} className="max-w-[760px]" />
     </>

@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
 import { ChevronLeft, SearchX } from "lucide-react";
 import { useConsole, useResource } from "@/components/console-provider";
 import { ExtLink } from "@/components/ext-link";
-import { Card, EmptyState, ErrorState, Pill, SectionTitle, Skeleton, Status, type Tone } from "@/components/ui";
+import { Card, EmptyState, ErrorState, Pill, SectionTitle, Skeleton, StaleNotice, Status, type Tone } from "@/components/ui";
 import { api, ApiError, errorMessage } from "@/lib/api";
 import { fmtClock, fmtDuration, parseTime } from "@/lib/format";
 import { AGENT_STATUS, COLUMN_LABEL, DECISION_STATE, EVENT_TYPE, TASK_STATUS } from "@/lib/labels";
@@ -58,6 +58,7 @@ export function TaskView() {
   return (
     <div className="lc-fade-in">
       {back}
+      {res.error ? <StaleNotice className="mb-6" message={errorMessage(res.error)} onRetry={res.reload} retrying={res.loading} /> : null}
       <Header d={d} />
       <div className="mt-8 grid gap-5 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
         <Info d={d} />

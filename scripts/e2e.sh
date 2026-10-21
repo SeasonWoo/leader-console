@@ -173,7 +173,7 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' "$BASE/no-such-page")
 step "浏览器走查（无头 Chrome，真实 CSP）：三个页面、客户端导航、旧 hash 链接、页面作答 $UI_DECISION"
 browser=0
 if command -v node >/dev/null; then
-	node "$ROOT/scripts/e2e-browser.mjs" "$BASE" "$PROJECT" "$UI_DECISION" || browser=$?
+	node "$ROOT/scripts/e2e-browser.mjs" "$BASE" "$PROJECT" "$UI_DECISION" "$TMP/root" || browser=$?
 else
 	browser=2
 fi

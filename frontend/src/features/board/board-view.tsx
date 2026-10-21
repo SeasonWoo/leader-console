@@ -8,7 +8,7 @@ import { useState } from "react";
 import { AlertTriangle, ChevronRight, Clock, LayoutGrid, RotateCcw } from "lucide-react";
 import { useConsole, useResource } from "@/components/console-provider";
 import { ExtLink } from "@/components/ext-link";
-import { Card, Dot, EmptyState, ErrorState, PageHeader, Pill, Skeleton, type Tone } from "@/components/ui";
+import { Card, Dot, EmptyState, ErrorState, PageHeader, Pill, Skeleton, StaleNotice, type Tone } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { fmtAgo, fmtDuration, parseTime } from "@/lib/format";
 import { AGENT_STATUS, COLUMNS, LEADER_REASON, TASK_STATUS } from "@/lib/labels";
@@ -46,13 +46,16 @@ export function BoardView() {
       ) : !res.data ? (
         <BoardSkeleton />
       ) : (
-        <Board
+        <>
+          {res.error ? <StaleNotice className="mb-5" message={errorMessage(res.error)} onRetry={res.reload} retrying={res.loading} /> : null}
+          <Board
           tasks={res.data.tasks}
           showProject={!project}
           now={now}
           allDone={allDone}
           onToggleDone={() => setAllDone((showAllDone = !allDone))}
-        />
+          />
+        </>
       )}
 
       {warnings.length > 0 && (

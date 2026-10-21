@@ -156,6 +156,25 @@ export function ErrorState({ message, onRetry, className }: { message: string; o
   );
 }
 
+/**
+ * 刷新失败但仍保留上次成功的数据时的提示：内容可能已过期，并提供重试入口。
+ * 首次加载失败（没有旧数据）用 ErrorState。
+ */
+export function StaleNotice({ message, onRetry, retrying, className }: { message: string; onRetry: () => void; retrying?: boolean; className?: string }) {
+  return (
+    <div role="alert" data-stale="" className={cn("lc-fade-in flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-xl border border-line bg-surface px-4 py-2.5 text-[13px] text-fg-2", className)}>
+      <Dot tone="orange" />
+      <span className="min-w-0 flex-1">
+        刷新失败，下面显示的可能是旧数据：<span className="text-muted">{message}</span>
+      </span>
+      <Button size="sm" onClick={onRetry} disabled={retrying}>
+        <RotateCw className="size-3.5" aria-hidden />
+        {retrying ? "重试中…" : "重试"}
+      </Button>
+    </div>
+  );
+}
+
 export function Skeleton({ className }: { className?: string }) {
   return <div aria-hidden className={cn("rounded-lg bg-surface-2 motion-safe:animate-pulse", className)} />;
 }

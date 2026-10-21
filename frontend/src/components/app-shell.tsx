@@ -7,7 +7,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { Columns3, Inbox, Monitor, Moon, Sun } from "lucide-react";
 import { useConsole } from "./console-provider";
-import { Dot, Segmented, Status } from "./ui";
+import { Button, Dot, Segmented, Status } from "./ui";
 import { boardHref, decisionsHref } from "@/lib/routes";
 import { fmtClock } from "@/lib/format";
 import { LEADER_REASON } from "@/lib/labels";
@@ -23,7 +23,7 @@ function usePage(): { page: Page; project: string } {
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { error, overview } = useConsole();
+  const { error, overview, refresh } = useConsole();
   return (
     <div className="min-h-dvh lg:grid lg:grid-cols-[248px_minmax(0,1fr)]">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-full focus:bg-surface focus:px-4 focus:py-2">
@@ -33,7 +33,12 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="min-w-0">
         <MobileBar />
         <main id="main" className="mx-auto w-full max-w-[1480px] px-5 pt-8 pb-20 sm:px-8 lg:px-12 lg:pt-12">
-          {error && <Banner tone="red">{error}</Banner>}
+          {error && (
+            <Banner tone="red" action={<Button size="sm" onClick={() => void refresh()}>重试</Button>}>
+              {error}
+              {overview ? "；下面显示的可能是旧数据。" : ""}
+            </Banner>
+          )}
           {overview && !overview.herdr.ok && (
             <Banner tone="orange">
               herdr 不可用{overview.herdr.error ? `（${overview.herdr.error}）` : ""}：任务不判定 lost，新回答会排队，恢复后自动投递。
@@ -47,11 +52,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function Banner({ tone, children }: { tone: "red" | "orange"; children: ReactNode }) {
+function Banner({ tone, children, action }: { tone: "red" | "orange"; children: ReactNode; action?: ReactNode }) {
   return (
     <div role="status" className="mb-6 flex items-start gap-2.5 rounded-xl border border-line bg-surface px-4 py-3 text-[13px] text-fg-2">
       <Dot tone={tone} className="mt-1.5" />
-      <span>{children}</span>
+      <span className="min-w-0 flex-1">{children}</span>
+      {action}
     </div>
   );
 }

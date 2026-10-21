@@ -262,7 +262,8 @@ function AnswerForm({ v, leader, onChanged }: { v: DecisionView; leader: LeaderP
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         drafts.delete(key);
-        const cur = (e.body as { decision?: DecisionView })?.decision;
+        // 409 响应体的 current 是服务端当前的 DecisionView（internal/server writeError）。
+        const cur = (e.body as { current?: DecisionView })?.current;
         if (cur) optimistic.set(key, { base, view: cur });
         toast(e.code === "protocol_unavailable" ? "该项目尚未启用 leader 协议，无法在面板作答" : "该决策已被处理，已刷新为最新状态", "warn");
       } else {

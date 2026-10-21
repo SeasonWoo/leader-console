@@ -10,7 +10,10 @@ export NEXT_TELEMETRY_DISABLED := 1
 
 .PHONY: build go-build web web-deps web-test web-verify web-dev test race vet fmt check e2e run run-fixture clean
 
-build: web go-build ## 构建前端并编译单二进制到 bin/（前端产物嵌入二进制）
+# 顺序很重要：go:embed 读的是 web/dist，必须等 web 完全生成后再编译（make -j 下也成立），
+# 所以 go-build 不作为并列前置条件，而是在 recipe 里递归调用。
+build: web ## 构建前端并编译单二进制到 bin/（前端产物嵌入二进制）
+	$(MAKE) go-build
 
 go-build: ## 只编译 Go（使用已入库的 web/dist，不需要 Node）
 	go build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/leader-console
@@ -33,7 +36,9 @@ web-verify: web ## 校验已入库的 web/dist 与前端源码一致（合并前
 web-dev: web-deps ## 前端开发服务器（127.0.0.1:17810，配合 ?mock=1 使用）
 	cd frontend && $(PNPM) run dev
 
-test: web web-test ## 构建前端 + 前端测试 + Go 单元测试
+# 先构建前端（next build 与 next typegen 共用 frontend/.next，不能并行），再类型检查与前端测试，最后 Go 测试（读取刚生成的 web/dist）。
+test: web ## 构建前端 + 前端类型检查与测试 + Go 单元测试
+	$(MAKE) web-test
 	go test ./...
 
 race: ## 带竞态检测的测试
