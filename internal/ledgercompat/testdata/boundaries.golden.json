@@ -1,0 +1,110 @@
+{
+  "tasks": [
+    {
+      "id": "a",
+      "name": "a",
+      "kind": "codex",
+      "agent_name": "a",
+      "pane_id": "w1:pA",
+      "branch": "branch-a",
+      "goal": "转义 | 竖线",
+      "status": "done",
+      "result_summary": "等用户确认提交 /tmp/a.md",
+      "reports": [
+        "/tmp/a.md"
+      ],
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-21T09:30:00+08:00",
+      "notified_at": "2026-10-21T10:00:00+08:00"
+    },
+    {
+      "id": "a#2",
+      "name": "a",
+      "kind": "other",
+      "agent_name": "a",
+      "worktree": "/work/tree",
+      "goal": "second",
+      "status": "working",
+      "result_summary": "等待用户授权 MR",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    },
+    {
+      "id": "a#2#2",
+      "name": "a#2",
+      "kind": "claude",
+      "agent_name": "a#2",
+      "pane_id": "w9:pZ",
+      "branch": "无（只读）",
+      "goal": "collision",
+      "status": "blocked",
+      "result_summary": "需要用户决定",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    },
+    {
+      "id": "a#3",
+      "name": "a",
+      "kind": "codex",
+      "agent_name": "a",
+      "pane_id": "w9:pX",
+      "worktree": "\u003chome\u003e/work",
+      "goal": "third",
+      "status": "done",
+      "result_summary": "待用户确认",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    },
+    {
+      "id": "extra",
+      "name": "extra",
+      "kind": "codex",
+      "agent_name": "extra",
+      "pane_id": "w2:pA",
+      "branch": "branch",
+      "goal": "goal",
+      "status": "working",
+      "result_summary": "result",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "2026-10-21T11:30:00+08:00"
+    },
+    {
+      "id": "short",
+      "name": "short",
+      "kind": "",
+      "agent_name": "short",
+      "goal": "",
+      "status": "reviewing",
+      "result_summary": "short",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    }
+  ],
+  "hints": [
+    {
+      "task_id": "a",
+      "text": "等用户确认提交 /tmp/a.md"
+    },
+    {
+      "task_id": "a#2",
+      "text": "等待用户授权 MR"
+    },
+    {
+      "task_id": "a#2#2",
+      "text": "需要用户决定"
+    },
+    {
+      "task_id": "a#3",
+      "text": "待用户确认"
+    }
+  ],
+  "warnings": [
+    "ledger.md:13: duplicate name \"a\", id \"a#2\"",
+    "ledger.md:13: unknown status \"???\", using working",
+    "ledger.md:14: duplicate name \"a#2\", id \"a#2#2\"",
+    "ledger.md:15: duplicate name \"a\", id \"a#3\"",
+    "ledger.md:16: column count 11, expected 9",
+    "ledger.md:17: column count 3, expected 9",
+    "ledger.md:18: empty name, skipped"
+  ]
+}

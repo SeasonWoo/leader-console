@@ -1,0 +1,28 @@
+{
+  "tasks": [
+    {
+      "id": "minimal",
+      "name": "minimal",
+      "kind": "",
+      "agent_name": "minimal",
+      "goal": "",
+      "status": "done",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    },
+    {
+      "id": "bad-status",
+      "name": "bad-status",
+      "kind": "",
+      "agent_name": "bad-status",
+      "goal": "",
+      "status": "working",
+      "created_at": "0001-01-01T00:00:00Z",
+      "updated_at": "0001-01-01T00:00:00Z"
+    }
+  ],
+  "hints": null,
+  "warnings": [
+    "ledger.md:4: unknown status \"nonsense\", using working"
+  ]
+}

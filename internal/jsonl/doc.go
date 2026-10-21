@@ -1,5 +1,3 @@
-// Package jsonl 提供 JSON Lines 的加锁追加、容错读取（跳过坏行、忽略未以换行结尾的末行）
-// 和按 key 折叠等通用工具。
-//
-// 负责任务：A。骨架阶段为空包。
+// Package jsonl 提供 JSON Lines 的加锁追加和完整行读取。
+// 读取保留坏行及其位置，由调用方解码、警告并跳过；忽略末尾残行。
 package jsonl
