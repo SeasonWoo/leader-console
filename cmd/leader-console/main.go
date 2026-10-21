@@ -24,7 +24,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           server.New(web.Static()),
+		Handler:           server.New(nil, web.Static(), server.Options{Addr: cfg.Addr}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
