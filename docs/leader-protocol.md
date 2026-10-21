@@ -224,3 +224,58 @@ summary 一句话，不要粘贴凭证、token 或大段日志。
 - 灰度：先在一个项目上启用（建议新项目），面板同时支持新旧两种数据；旧项目继续用 ledger.md，面板只读展示。
 - 回退：删除 leader.md 中上述条文即可，`~/.leader/<project>/` 下新增文件不影响旧流程（ledger.md 始终保留）。
 - 兼容承诺：面板永远能只读解析 ledger.md；协议文件缺失或损坏时面板降级为只读，不影响 leader 工作。
+
+---
+
+## 11. 待审批增补（面板定时汇报 / leader 切换 CLI，**未合入 leader.md**）
+
+> 来源：`feat/lc-leader-scheduler`。面板侧已实现，下列条文需用户批准后才能改 `~/.claude/agents/leader.md`。
+> 不改也能工作：面板默认 `-report-grace 5m`，只在 leader 自己的 cron 迟到 5 分钟以上时补发，作为兜底。
+
+**A1【修改】会话启动第 3 步（cron）**——让面板成为唯一的定时来源，修掉 cron 7 天过期、`--continue` 后丢失，也让 Codex leader 能用：
+
+```markdown
+3. 执行 `curl -fsS http://127.0.0.1:7788/healthz`。若 `report_scheduler.enabled` 为 true，且 `projects` 为空或包含 `<project>`，
+   说明面板会定时投递【定期汇报】：不要创建定期汇报 cron，CronList 里已有的用 CronDelete 删掉。
+   否则（面板未运行或未开启）用 CronList 检查，没有就用 CronCreate 创建：cron `*/10 * * * *`，prompt `【定期汇报】`，recurring。
+```
+
+批准后面板改用 `-report-grace 0s`，汇报节奏回到每 10 分钟。
+
+**A2【替换】会话启动第 4 步（自我识别与命名）**——“标题为 leader 的 claude agent”对 Codex 不成立；会话恢复后名字会丢：
+
+```markdown
+4. 给自己在 herdr 中命名：当前 pane 是 `$HERDR_PANE_ID`（`herdr agent get "$HERDR_PANE_ID"` 可确认 cwd 与 agent）。
+   名字优先沿用 leader.json 的 `leader.herdr_name`；没有再按下方“leader 命名”计算。当前名字不同就执行
+   `herdr agent rename "$HERDR_PANE_ID" <名字>`。
+```
+
+**A3【修改】会话启动第 5 步（leader.json）**——面板现在按 kind 核验，写错 kind 会显示 `agent_kind_mismatch` 且不投递：
+
+```markdown
+5. 写 leader.json：…… leader={agent:<实际 CLI：claude 或 codex>, herdr_name, pane_id, session_id（仅当 herdr 返回了 agent_session.value 才写）}……
+```
+
+**A4【修改】定期汇报第 1 步**——名字丢失的兜底（roadmap P2 协议侧）：
+
+```markdown
+1. 刷新 leader.json 的 heartbeat_at；顺带确认自己在 herdr 中的名字等于 leader.json 的 herdr_name，不等就 rename。
+```
+
+并注明：`【定期汇报】project=<project> source=leader-console` 与 cron 发来的 `【定期汇报】` 处理方式完全相同。
+
+**A5【新增】会话启动第 0 步（接管识别）**——切换 CLI 或换 pane 后，新 leader 需要明确“接管”而不是“新开”：
+
+```markdown
+0. 若 leader.json 已存在，且其中的 leader.agent / pane_id / session_id 与自己不同，视为接管上一任 leader：
+   - 先追加事件 `{"type":"other","summary":"leader 接管：<旧 agent>→<新 agent>"}`；
+   - 以 state.json 为准，不重新派发仍在运行的 worker；复用 worker 时沿用其 herdr 名字和报告目录；
+   - 上一任投递过但没有 decision_ack 的回答，在第 6 步“拾取未处理的回答”中照常处理（answers.jsonl 是事实源）；
+   - 上一任挂的后台监听、cron 都随旧会话消失，按第 2、3 步重建（Codex 不挂后台监听，见适配层）。
+```
+
+**A6【新增】适配层拆分**——把 leader.md 中依赖 Claude Code 的条目（CronCreate、后台 wait 唤醒、PushNotification、`--continue`、
+`--permission-mode auto`、自我识别）集中到一节“适配层：Claude”，Codex 版本见 [leader-switch.md 附录](leader-switch.md#附录codex-适配层建议文本放进-profile-的-developer_instructions)。
+核心协议只描述“需要什么能力和完成证据”。
+
+**A7【建议】Claude leader 启动命令固定带 `--permission-mode auto`**：auto 模式不随重启保留（交叉评审已核实）。

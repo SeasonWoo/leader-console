@@ -145,6 +145,9 @@ func TestCacheHitAndInvalidation(t *testing.T) {
 		if name == "ledger.md" {
 			put(t, path, "# unused")
 		}
+		if name == "panel.jsonl" {
+			put(t, path, "")
+		}
 		stamp(t, path, int64(100+i))
 		next := load(t, f, "demo")
 		if next == old || next.Version == old.Version {
@@ -473,5 +476,46 @@ func TestAppendCreatesAnswerFiles(t *testing.T) {
 	var got model.AnswerLine
 	if err := json.Unmarshal(b, &got); err != nil || got.AnswerID != line.AnswerID || len(b) == 0 || b[len(b)-1] != '\n' {
 		t.Fatalf("bad answer %s %v", b, err)
+	}
+}
+
+func TestPanelLinesAppendAndFold(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	before := load(t, f, "demo")
+	if len(before.Panel.Reports) != 0 || len(before.Panel.Leaders) != 0 {
+		t.Fatalf("fixture has panel lines: %+v", before.Panel)
+	}
+	at := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	for i := 0; i < model.PanelKeep+3; i++ {
+		if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, At: at.Add(time.Duration(i) * time.Minute), Delivery: model.DeliveryDelivered, Attempt: 1, Target: "leader-demo"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := at
+	if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelLeader, At: at, Leader: &model.LeaderAgent{Agent: "codex", HerdrName: "leader-demo"}, StartedAt: &started}); err != nil {
+		t.Fatal(err)
+	}
+	f2, _ := NewFS(root, FSOptions{}) // a fresh reader (panel restart) sees the same history
+	for _, fs := range []*FS{f, f2} {
+		pd := load(t, fs, "demo")
+		if pd.Version == before.Version || len(pd.Panel.Reports) != model.PanelKeep || !pd.Panel.Reports[model.PanelKeep-1].At.Equal(at.Add(time.Duration(model.PanelKeep+2)*time.Minute)) {
+			t.Fatalf("reports = %+v", pd.Panel.Reports)
+		}
+		if len(pd.Panel.Leaders) != 1 || pd.Panel.Leaders[0].Leader.Agent != "codex" || len(pd.Warnings) != 0 {
+			t.Fatalf("leaders = %+v warnings=%v", pd.Panel.Leaders, pd.Warnings)
+		}
+		if len(pd.Answers) != len(before.Answers) {
+			t.Fatal("panel lines leaked into answers")
+		}
+	}
+	put(t, filepath.Join(root, "demo", "panel.jsonl"), `{"type":"report","at":"2026-10-21T08:00:00Z","delivery":"bogus"}
+{"type":"leader","at":"2026-10-21T08:00:00Z"}
+{"type":"other","at":"2026-10-21T08:00:00Z"}
+`)
+	if pd := load(t, f, "demo"); len(pd.Warnings) != 3 || len(pd.Panel.Reports)+len(pd.Panel.Leaders) != 0 {
+		t.Fatalf("invalid panel lines: %v %+v", pd.Warnings, pd.Panel)
+	}
+	if err := f.AppendPanel(bg, "absent", model.PanelLine{}); !errors.Is(err, ErrProjectNotFound) {
+		t.Fatal(err)
 	}
 }

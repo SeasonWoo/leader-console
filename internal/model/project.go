@@ -24,6 +24,8 @@ type ProjectData struct {
 	Decisions []Decision `json:"decisions"`
 	// Answers 已按 AnswerID 折叠，按 At 升序。
 	Answers []Answer `json:"answers"`
+	// Panel 是面板自己写的 panel.jsonl 折叠结果（定期汇报投递记录、leader 身份变化）。
+	Panel PanelState `json:"panel"`
 	// LegacyHints 是从 ledger.md 推断出的“疑似待确认”事项，不可在面板作答。
 	LegacyHints []LegacyHint `json:"legacy_hints,omitempty"`
 	// Warnings 记录解析时跳过的坏行等问题，前端以小字提示。

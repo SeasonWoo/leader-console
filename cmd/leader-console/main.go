@@ -47,7 +47,11 @@ func main() {
 		Render:  render.Markdown,
 		ToMerge: ledgercompat.LikelyToMerge,
 		Now:     time.Now,
-	}, service.Options{ScanInterval: cfg.ScanInterval, HerdrInterval: cfg.HerdrInterval})
+	}, service.Options{
+		ScanInterval:  cfg.ScanInterval,
+		HerdrInterval: cfg.HerdrInterval,
+		Reports:       service.ReportOptions{Enabled: cfg.Reports, Projects: cfg.ReportProjects, Grace: cfg.ReportGrace, StartupDelay: cfg.ReportStartupDelay},
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

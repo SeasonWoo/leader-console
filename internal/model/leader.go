@@ -22,9 +22,10 @@ type LeaderInfo struct {
 }
 
 // LeaderAgent 描述 leader 在 herdr 中的身份。回传时优先用 HerdrName 作为 target，
-// 否则用 PaneID；投递前必须用 Cwd / SessionID 校验目标确实是这个 leader。
+// 名字丢失或未命名时用 PaneID；投递前必须用 Cwd / Agent / SessionID 校验目标确实是这个 leader
+// （规则见 reconcile.ResolveLeader，在线判断和投递共用）。
 type LeaderAgent struct {
-	Agent     string `json:"agent"` // 目前固定为 "claude"
+	Agent     string `json:"agent"` // claude / codex；与 herdr 现场的 agent kind 必须一致
 	HerdrName string `json:"herdr_name,omitempty"`
 	PaneID    string `json:"pane_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"` // herdr agent_session.value

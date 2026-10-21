@@ -69,7 +69,7 @@ func New(svc *service.Service, static fs.FS, opts Options) http.Handler {
 func (h *handler) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", h.only("GET", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"status": "ok", "version": Version, "uptime_sec": int64(time.Since(h.started).Seconds())})
+		writeJSON(w, 200, map[string]any{"status": "ok", "version": Version, "uptime_sec": int64(time.Since(h.started).Seconds()), "report_scheduler": h.svc.ReportScheduler()})
 	}))
 	mux.HandleFunc("/api/v1/overview", h.only("GET", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, h.svc.Overview()) }))
 	mux.HandleFunc("/api/v1/tasks", h.only("GET", func(w http.ResponseWriter, r *http.Request) {

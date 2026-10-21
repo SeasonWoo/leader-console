@@ -40,6 +40,8 @@ type Options struct {
 	QueueInterval time.Duration
 	// LockPath defaults to $XDG_STATE_HOME/leader-console/instance.lock.
 	LockPath string
+	// Reports configures the panel-side 【定期汇报】 scheduler (reports.go).
+	Reports ReportOptions
 }
 
 type snapshot struct {
@@ -61,6 +63,8 @@ type Service struct {
 	agents     []herdr.Agent
 	health     model.HerdrHealth
 	due        map[string]time.Time
+	started    time.Time
+	reportWait map[string]string // project → why a due report is waiting (in-memory only)
 	wake       chan struct{}
 	subMu      sync.Mutex
 	subs       map[chan string]struct{}
@@ -121,7 +125,9 @@ func New(deps Deps, opts Options) *Service {
 	if opts.QueueInterval <= 0 {
 		opts.QueueInterval = 250 * time.Millisecond
 	}
-	s := &Service{deps: deps, opts: opts, projects: map[string]*model.ProjectData{}, due: map[string]time.Time{}, wake: make(chan struct{}, 1), subs: map[chan string]struct{}{}, terminals: map[string]terminalEntry{}}
+	opts.Reports.Grace = max(opts.Reports.Grace, 0)
+	opts.Reports.StartupDelay = max(opts.Reports.StartupDelay, 0)
+	s := &Service{deps: deps, opts: opts, projects: map[string]*model.ProjectData{}, due: map[string]time.Time{}, started: deps.Now(), reportWait: map[string]string{}, wake: make(chan struct{}, 1), subs: map[chan string]struct{}{}, terminals: map[string]terminalEntry{}}
 	s.publishLocked()
 	return s
 }
@@ -141,6 +147,9 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	defer lock.Close() // closing releases flock; never unlink the inode
+	s.mu.Lock()
+	s.started = s.deps.Now()
+	s.mu.Unlock()
 	s.refreshHerdr(ctx)
 	if err := s.scan(ctx); err != nil {
 		return err
@@ -160,6 +169,7 @@ func (s *Service) Run(ctx context.Context) error {
 				s.deliver(workerCtx)
 			case <-ticker.C:
 				s.deliver(workerCtx)
+				s.reports(workerCtx)
 			}
 		}
 	}()
@@ -251,7 +261,7 @@ func (s *Service) scan(ctx context.Context) error {
 			}
 			continue
 		}
-		next[name] = clone(pd)
+		next[name] = s.observeLeader(ctx, clone(pd))
 	}
 	s.projects = next
 	s.publishLocked()
@@ -311,7 +321,7 @@ func (s *Service) Subscribe() (<-chan string, func()) {
 func (s *Service) publishLocked() {
 	now := s.deps.Now()
 	out := &snapshot{projects: make(map[string]*model.ProjectData, len(s.projects)), tasks: []model.TaskView{}, decisions: []model.DecisionView{}}
-	out.overview = model.Overview{GeneratedAt: now, Projects: []model.ProjectSummary{}, Decisions: []model.DecisionView{}, LegacyHints: []model.LegacyHintView{}, Herdr: s.health}
+	out.overview = model.Overview{GeneratedAt: now, Projects: []model.ProjectSummary{}, Decisions: []model.DecisionView{}, LegacyHints: []model.LegacyHintView{}, Herdr: s.health, ReportScheduler: s.ReportScheduler()}
 	names := make([]string, 0, len(s.projects))
 	for name := range s.projects {
 		names = append(names, name)
@@ -321,6 +331,13 @@ func (s *Service) publishLocked() {
 		pd := s.projects[name]
 		out.projects[name] = pd
 		leader, live := s.deps.Reconcile(clone(pd), append([]herdr.Agent(nil), s.agents...), s.health.OK, now)
+		leader.Change = leaderChange(pd)
+		if plan, ok := s.reportPlan(pd); ok {
+			if !now.Before(plan.NextDueAt) {
+				plan.Waiting = s.reportWait[name]
+			}
+			leader.Report = &plan
+		}
 		summary := model.ProjectSummary{Name: name, Source: pd.Source, Leader: leader, TaskCounts: map[string]int{"in_progress": 0, "blocked": 0, "reviewing": 0, "to_merge": 0, "done": 0}, Warnings: append([]string(nil), pd.Warnings...)}
 		if pd.Leader != nil {
 			summary.Title = pd.Leader.Title

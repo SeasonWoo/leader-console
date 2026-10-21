@@ -28,7 +28,7 @@ var (
 	tmpReportRE = regexp.MustCompile(`^/tmp/[A-Za-z0-9._-]+\.md$`)
 )
 
-var sources = []string{"leader.json", "state.json", "ledger.md", "events.jsonl", "decisions.jsonl", "answers.jsonl"}
+var sources = []string{"leader.json", "state.json", "ledger.md", "events.jsonl", "decisions.jsonl", "answers.jsonl", "panel.jsonl"}
 
 // FSOptions configures legacy timestamps and report reads.
 type FSOptions struct {
@@ -221,10 +221,9 @@ func (f *FS) LoadProject(ctx context.Context, project string) (*model.ProjectDat
 		case model.LineAnswer:
 			answers[a.AnswerID] = model.Answer{AnswerID: a.AnswerID, DecisionID: a.DecisionID, Option: a.Option, Text: a.Text, ClientRequestID: a.ClientRequestID, AnsweredAt: a.At, UpdatedAt: a.At, Delivery: model.DeliveryQueued}
 		case model.LineDelivery:
-			switch a.Delivery {
-			case model.DeliveryQueued, model.DeliveryRetry, model.DeliveryDelivered, model.DeliveryFailed:
+			if validDelivery(a.Delivery) {
 				deliveries[a.AnswerID] = a
-			default:
+			} else {
 				pd.Warnings = append(pd.Warnings, fmt.Sprintf("answers.jsonl:%d: invalid delivery", row.number))
 			}
 		default:
@@ -254,11 +253,40 @@ func (f *FS) LoadProject(ctx context.Context, project string) (*model.ProjectDat
 		}
 		return a.AnsweredAt.Before(b.AnsweredAt)
 	})
+	for _, row := range readRows(root, "panel.jsonl", &pd.Warnings) {
+		var l model.PanelLine
+		if !decodeRow("panel.jsonl", row, &l, &pd.Warnings) {
+			continue
+		}
+		switch {
+		case l.Type == model.PanelReport && validDelivery(l.Delivery):
+			pd.Panel.Reports = keepTail(append(pd.Panel.Reports, l))
+		case l.Type == model.PanelLeader && l.Leader != nil:
+			pd.Panel.Leaders = keepTail(append(pd.Panel.Leaders, l))
+		default:
+			pd.Warnings = append(pd.Warnings, fmt.Sprintf("panel.jsonl:%d: invalid line", row.number))
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	f.cache[project] = pd
 	return pd, nil
+}
+
+func validDelivery(d model.DeliveryStatus) bool {
+	switch d {
+	case model.DeliveryQueued, model.DeliveryRetry, model.DeliveryDelivered, model.DeliveryFailed:
+		return true
+	}
+	return false
+}
+
+func keepTail(lines []model.PanelLine) []model.PanelLine {
+	if len(lines) > model.PanelKeep {
+		return append([]model.PanelLine(nil), lines[len(lines)-model.PanelKeep:]...)
+	}
+	return lines
 }
 
 // fingerprint includes report directories and files: editing an existing report
@@ -422,6 +450,14 @@ func knownEvent(kind model.EventType) bool {
 }
 
 func (f *FS) AppendAnswer(ctx context.Context, project string, line model.AnswerLine) error {
+	return f.appendLine(ctx, project, "answers.jsonl", line)
+}
+
+func (f *FS) AppendPanel(ctx context.Context, project string, line model.PanelLine) error {
+	return f.appendLine(ctx, project, "panel.jsonl", line)
+}
+
+func (f *FS) appendLine(ctx context.Context, project, name string, line any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	root, err := f.openProject(ctx, project)
@@ -436,7 +472,7 @@ func (f *FS) AppendAnswer(ctx context.Context, project string, line model.Answer
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := jsonl.AppendRoot(root, "answers.jsonl", "answers.jsonl.lock", b); err != nil {
+	if err := jsonl.AppendRoot(root, name, name+".lock", b); err != nil {
 		return err
 	}
 	delete(f.cache, project)

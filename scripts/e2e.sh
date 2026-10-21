@@ -1,6 +1,7 @@
 #!/bin/sh
 # 端到端：夹具副本 + 假 herdr 启动真实二进制，用 curl 走一遍
-# overview → 取 token → 作答 → answers.jsonl 记 delivered → 假 herdr 收到【决策回传】→ 追加 decision_ack → acked。
+# overview → 取 token → 作答 → answers.jsonl 记 delivered → 假 herdr 收到【决策回传】→ 追加 decision_ack → acked；
+# 再走定时【定期汇报】：忙/身份不符/离线不投 → 空闲投一次 → 同周期不重复 → 重启不补发 → claude→codex 切换被识别。
 # 用法：make e2e（或 scripts/e2e.sh [二进制路径]）。不读真实 ~/.leader，不调用真实 herdr。
 set -eu
 
@@ -75,12 +76,17 @@ jq --arg now "$now" '.tasks += [
 ]' "$state_json" >"$state_json.new"
 mv "$state_json.new" "$state_json"
 
+HS=$TMP/herdr-state # 假 herdr 的 leader 现场开关，见 testdata/fake-herdr.sh
+mkdir -p "$HS"
+start_server() {
+	XDG_STATE_HOME=$TMP/state FAKE_HERDR_LOG=$TMP/herdr.log FAKE_HERDR_STATE=$HS \
+		"$BIN" -addr "$ADDR" -leader-root "$TMP/root" -herdr-cmd "$ROOT/testdata/fake-herdr.sh" \
+		-scan-interval 300ms -herdr-interval 1s -report-grace 0s -report-startup-delay 2s >>"$TMP/server.log" 2>&1 &
+	PID=$!
+	wait_for 15 "healthz" curl -fsS "$BASE/healthz"
+}
 step "启动 ${BIN}（${ADDR}，假 herdr）"
-XDG_STATE_HOME=$TMP/state FAKE_HERDR_LOG=$TMP/herdr.log \
-	"$BIN" -addr "$ADDR" -leader-root "$TMP/root" -herdr-cmd "$ROOT/testdata/fake-herdr.sh" \
-	-scan-interval 300ms -herdr-interval 1s >"$TMP/server.log" 2>&1 &
-PID=$!
-wait_for 15 "healthz" curl -fsS "$BASE/healthz"
+start_server
 
 step "overview：项目、leader 在线、herdr 可用、决策 open"
 ov=$(overview)
@@ -152,5 +158,63 @@ step "模拟 leader 追加 decision_ack → acked"
 printf '{"ts":"%s","type":"decision_ack","actor":"leader","task_id":"uih-copilot","decision_id":"%s","answer_id":"%s","summary":"收到：A 提交并提 MR"}\n' \
 	"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DECISION" "$answer_id" >>"$TMP/root/$PROJECT/events.jsonl"
 wait_for 10 "overview 状态 acked" state_is acked
+
+leader_json_set() { # leader_json_set <jq 表达式> [--arg k v ...]：整文件替换 leader.json，模拟 leader 写入
+	expr=$1
+	shift
+	jq "$@" "$expr" "$leader_json" >"$leader_json.tmp" && mv "$leader_json.tmp" "$leader_json"
+}
+leader_field() { overview | jq -r --arg p "$PROJECT" ".projects[] | select(.name == \$p) | .leader | $1"; }
+field_is() { [ "$(leader_field "$1")" = "$2" ]; }
+reports_sent() { grep -c "【定期汇报】project=$PROJECT source=leader-console" "$TMP/herdr.log" || true; }
+sent_is() { [ "$(reports_sent)" = "$1" ]; }
+panel=$TMP/root/$PROJECT/panel.jsonl
+ago=$(date -u -v-11M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+
+step "定期汇报：心跳已过一个周期，但 leader 正忙（working）→ 暂缓"
+leader_json_set '.heartbeat_at = $t' --arg t "$ago"
+wait_for 10 "report.waiting=leader_busy" field_is '.report.waiting // ""' leader_busy
+sent_is 0 || fail "忙时投了定期汇报：$(cat "$TMP/herdr.log")"
+
+step "同 pane 换成 codex、leader.json 仍是 claude → 身份不符，不投"
+printf idle >"$HS/leader_status"
+printf codex >"$HS/leader_kind"
+wait_for 10 "reason=agent_kind_mismatch" field_is .reason agent_kind_mismatch
+wait_for 20 "report.waiting=not_identified" field_is '.report.waiting // ""' not_identified
+sent_is 0 || fail "身份不符时投了定期汇报"
+
+step "leader 已退出 → 离线，不投"
+rm -f "$HS/leader_kind"
+touch "$HS/leader_gone"
+wait_for 10 "reason=agent_not_found" field_is .reason agent_not_found
+sleep 3
+sent_is 0 || fail "离线时投了定期汇报"
+
+step "leader 回到空闲且身份核验通过 → 投递一次"
+rm -f "$HS/leader_gone"
+wait_for 25 "收到【定期汇报】" sent_is 1
+grep -q "^leader-demo	【定期汇报】project=$PROJECT source=leader-console$" "$TMP/herdr.log" || fail "汇报 target/文本不符：$(cat "$TMP/herdr.log")"
+jq -e 'select(.type == "report" and .delivery == "delivered" and .target == "leader-demo")' "$panel" | grep -q . || fail "panel.jsonl 无投递记录"
+[ "$(jq -r '.heartbeat_at' "$leader_json")" = "$ago" ] || fail "面板改写了 heartbeat"
+
+step "同一周期不重复（leader 未刷新心跳也不叠加）"
+sleep 3
+sent_is 1 || fail "同周期重复投递：$(reports_sent)"
+field_is .report.unacked 1 || fail "unacked 不符：$(leader_field .report)"
+
+step "重启面板不补发"
+kill "$PID" && wait "$PID" 2>/dev/null || true
+PID=
+start_server
+sleep 4
+sent_is 1 || fail "重启后补发了定期汇报"
+[ "$(jq -c 'select(.type == "leader")' "$panel" | wc -l | tr -d ' ')" = 1 ] || fail "重启后重复记录 leader 身份：$(cat "$panel")"
+
+step "leader 切换 claude→codex：新 leader 写 leader.json 后面板识别并标注"
+printf codex >"$HS/leader_kind"
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+leader_json_set '.leader.agent = "codex" | del(.leader.session_id) | .started_at = $t | .heartbeat_at = $t' --arg t "$now"
+wait_for 10 "leader.change.switched" field_is '[.online, .agent, .change.switched, .change.from.agent, .change.to.agent] | join(",")' 'true,codex,true,claude,codex'
+sent_is 1 || fail "切换后立刻补发了定期汇报"
 
 step "PASS"

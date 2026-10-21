@@ -25,6 +25,8 @@ type fakeStore struct {
 	projects                               map[string]*model.ProjectData
 	lines                                  []model.AnswerLine
 	listErr, loadErr, appendErr, reportErr error
+	panelErr                               error
+	panel                                  []model.PanelLine
 	report                                 []byte
 	refs                                   []model.ReportRef
 }
@@ -87,6 +89,36 @@ func (f *fakeStore) AppendAnswer(_ context.Context, p string, l model.AnswerLine
 	}
 	pd.Version = fmt.Sprint(len(f.lines))
 	return nil
+}
+func (f *fakeStore) AppendPanel(_ context.Context, p string, l model.PanelLine) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.panelErr != nil {
+		return f.panelErr
+	}
+	pd := f.projects[p]
+	if pd == nil {
+		return store.ErrProjectNotFound
+	}
+	f.panel = append(f.panel, l)
+	if l.Type == model.PanelReport {
+		pd.Panel.Reports = append(pd.Panel.Reports, l)
+	} else {
+		pd.Panel.Leaders = append(pd.Panel.Leaders, l)
+	}
+	pd.Version = fmt.Sprint("p", len(f.panel))
+	return nil
+}
+func (f *fakeStore) panelLines(kind model.PanelLineType) []model.PanelLine {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []model.PanelLine
+	for _, l := range f.panel {
+		if l.Type == kind {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 func (f *fakeStore) edit(fn func(*model.ProjectData)) {
 	f.mu.Lock()

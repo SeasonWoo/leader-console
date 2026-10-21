@@ -12,6 +12,7 @@ import (
 
 	"leader-console/internal/herdr"
 	"leader-console/internal/model"
+	"leader-console/internal/reconcile"
 )
 
 type AnswerInput struct {
@@ -315,28 +316,10 @@ func (s *Service) deliverOne(ctx context.Context, j deliveryJob) {
 	delete(s.due, key)
 	s.publishLocked()
 }
+
+// identityMatches is the delivery-time recheck; it shares reconcile's single identity rule.
 func identityMatches(li *model.LeaderInfo, target string, a herdr.Agent) bool {
-	if li == nil || li.Cwd == "" || a.Cwd != li.Cwd {
-		return false
-	}
-	expected := li.Leader.HerdrName
-	if expected == "" {
-		expected = li.Leader.PaneID
-	}
-	if expected != target {
-		return false
-	}
-	if li.Leader.HerdrName != "" {
-		if a.Name != target {
-			return false
-		}
-	} else if a.PaneID != target {
-		return false
-	}
-	if li.Leader.Agent != "" && a.Agent != li.Leader.Agent {
-		return false
-	}
-	return li.Leader.SessionID == "" || a.SessionID == "" || li.Leader.SessionID == a.SessionID
+	return reconcile.VerifyLeader(li, target, a)
 }
 func truncate(s string, n int) string {
 	r := []rune(s)

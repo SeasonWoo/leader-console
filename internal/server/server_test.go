@@ -49,6 +49,7 @@ func (f *apiStore) ListReports(context.Context, string, string) ([]model.ReportR
 func (f *apiStore) ReadReport(context.Context, string, string, string) ([]byte, error) {
 	return []byte("report secret-value"), nil
 }
+func (f *apiStore) AppendPanel(context.Context, string, model.PanelLine) error { return nil }
 func (f *apiStore) AppendAnswer(_ context.Context, p string, l model.AnswerLine) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -181,7 +182,7 @@ func TestRoutesAndSafeReadViews(t *testing.T) {
 	r := perform(h, "GET", "/healthz", "", nil)
 	var health map[string]any
 	_ = json.Unmarshal(r.Body.Bytes(), &health)
-	if health["status"] != "ok" || health["version"] != Version {
+	if sched, _ := health["report_scheduler"].(map[string]any); health["status"] != "ok" || health["version"] != Version || sched == nil || sched["enabled"] != false {
 		t.Fatal(health)
 	}
 	for _, host := range []string{"localhost:7788", "[::1]:7788"} {
