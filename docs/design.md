@@ -284,13 +284,13 @@ Go：`model.AnswerLine`（磁盘行）、`model.Answer`（折叠后）。
 
 Go：`model.PanelLine`（磁盘行）、`model.PanelState`（折叠后，每类只保留最后 20 行）。与 answers.jsonl 同样的“flock + O_APPEND + 单次 write”。
 
-- `type=report`：【定期汇报】的投递记录，每次尝试两行：prompt **之前**写意图行 `delivery=queued`（写不进去就不 prompt），之后写结果行 `delivered`（成功）/ `failed`（超时、stalled 等结果未知）/ `retry`（herdr 拒绝：agent_blocked / agent_not_found，确定没打字），带 `target`、`error`。用于重启后续接周期（不补发）和审计。
+- `type=report`：【定期汇报】的投递记录，每次尝试两行：prompt **之前**写意图行 `delivery=queued`（写不进去就不 prompt），之后写结果行 `delivered`（成功）/ `failed`（超时、stalled 等结果未知）/ `retry`（herdr 拒绝：agent_blocked / agent_not_found，确定没打字），带 `target`、`error`。同一次尝试的两行共用 `id`（`rp-<时间>-<随机>`），读取时按 id 折叠：同一结果行重复出现（写入其实成功但返回了错误、随后补写）只算一次。意图行之后若最终复核不通过，结果行写 `retry`（`error="not sent: <原因>"`），表示没有输入。用于重启后续接周期（不补发）和审计。
 - `type=leader`：面板观察到的 leader.json 身份（`leader` 对象 + `started_at`），首次看到或 agent/名字/pane/session/started_at 任一变化时追加一行。相邻两行即一次“leader 变化”，agent 变了就是“切换 CLI”。
 
 ```jsonl
 {"type":"leader","at":"2026-10-21T16:00:00+08:00","leader":{"agent":"claude","herdr_name":"leader-demo","pane_id":"w1:pA","session_id":"e4916e66-…"},"started_at":"2026-10-21T09:00:00+08:00"}
-{"type":"report","at":"2026-10-21T16:10:05+08:00","delivery":"queued","target":"leader-demo"}
-{"type":"report","at":"2026-10-21T16:10:05+08:00","delivery":"delivered","target":"leader-demo"}
+{"type":"report","at":"2026-10-21T16:10:05+08:00","id":"rp-20261021-081005-3fa9c1","delivery":"queued","target":"leader-demo"}
+{"type":"report","at":"2026-10-21T16:10:05+08:00","id":"rp-20261021-081005-3fa9c1","delivery":"delivered","target":"leader-demo"}
 {"type":"leader","at":"2026-10-21T17:02:11+08:00","leader":{"agent":"codex","herdr_name":"leader-demo","pane_id":"w1:pA"},"started_at":"2026-10-21T17:01:40+08:00"}
 ```
 
@@ -410,7 +410,7 @@ stateDiagram-v2
 
 - **开关**：`-leader-reports all|off|<逗号分隔项目>`（默认 `all`，只对有 state.json 的 lc-1 项目生效）；`-report-grace`（默认 5m）；`-report-startup-delay`（默认 1m）。
 - **到期**：周期起点 = max(`heartbeat_at`, 最后一次已消耗周期的尝试)。delivered、failed，以及只有意图行、结果未知（崩溃、审计写失败）的尝试都消耗周期；只有 `retry`（herdr 拒绝、确定没打字）不消耗；到期 = 起点 + `report_interval_min` + grace。leader 处理汇报会刷新 heartbeat_at，所以无论汇报来自面板还是 leader 自己的 CronCreate，同一周期最多一次。已投递但 leader 未刷新心跳（未确认）时不叠加：第 2 次起间隔按 2、4、6 倍拉长（上限 6 倍），刷新心跳后恢复。面板启动后至少等 startup-delay 才投，重启后从 panel.jsonl 续接周期，不补发错过的周期。
-- **何时投**：leader `identified` 且 herdr 状态为 `idle`/`done`；`working`/`unknown`（`leader_busy`）、`blocked`（`leader_blocked`）、找不到或身份不符（`not_identified`）都暂缓，每 15s 复查，不往 shell、审批框或进行中的回合里打字。投递前用 `agent get` 复核身份和状态，prompt 前再重读 leader.json（leader 的 cron 刚好触发、或 leader 刚被替换时放弃本次）。
+- **何时投**：leader `identified` 且 herdr 状态为 `idle`/`done`；`working`/`unknown`（`leader_busy`）、`blocked`（`leader_blocked`）、找不到或身份不符（`not_identified`）都暂缓，每 15s 复查，不往 shell、审批框或进行中的回合里打字。同一套“完整复核”（`reportGate`：现场 `agent get` + 重读 leader.json + 共用身份规则 + protocol_version + 可输入状态 + heartbeat_at 未推进）做两次：写意图行之前一次；意图行写完之后、prompt 之前再一次——意图写入可能等文件锁或磁盘数秒，这期间 leader 变忙、被替换或自己的 cron 刚处理过汇报，都会让本次作废（结果行记 `retry`/"not sent"，不消耗周期；心跳推进时按新心跳重新计周期）。最后一次复核到 prompt 之间只剩一次内存操作，herdr 状态在 `agent get` 与 `agent prompt` 之间的变化无法原子排除。
 - **心跳过期仍投**：heartbeat_stale 但 identified 的 leader 照样投——这正是 cron 失效（Claude 7 天过期、`--continue` 后丢失）时把 leader 叫醒的手段。面板**不代写** heartbeat，看板上的在线判断保持真实，决策回传仍等 leader 刷新心跳后再投。
 - **文本**：`【定期汇报】project=<project> source=leader-console`。
 - **失败与审计**（fail closed）：
@@ -418,7 +418,7 @@ stateDiagram-v2
   - prompt 被 herdr 拒绝（`agent_blocked`/`agent_not_found`）→ 结果行 `retry`，暂缓 15s 后本周期内再试；
   - 其他错误（超时、stalled、exec）→ 可能已经打了字，结果行 `failed`，本周期不再发，下个周期再来；
   - 结果行写失败 → 结果先留在内存，`waiting=audit_pending`，之后只重试写审计、绝不重发 prompt，写成功后恢复正常调度；进程在此期间退出，重启后只看到意图行，按“结果未知”消耗周期。
-- **展示**：`LeaderPresence.report = {interval_min, next_due_at, last_sent_at, unacked, waiting, last_error}`；`LeaderPresence.change` = 最近一次 leader 身份变化（`switched=true` 表示换了 CLI，如 claude→codex）。
+- **展示**：`LeaderPresence.report = {interval_min, next_due_at, last_sent_at, unacked, waiting, last_error}`；`LeaderPresence.change` = 最近一次 leader 身份变化（`switched=true` 表示换了 CLI，如 claude→codex）。change 是 panel.jsonl 中**最近已持久化**的观察：扫描先发布新的 leader.json，观察行写盘后才更新，短时间内可能看到“新登记 + 旧 change”，不是跨文件原子事务。
 
 ## 8. 并发与一致性
 
@@ -426,7 +426,7 @@ stateDiagram-v2
 |---|---|---|
 | leader.json / state.json | 仅本项目 leader | 写 `*.tmp` 后 `rename`（同目录原子替换）；读方要么看到旧版要么看到新版。 |
 | events.jsonl / decisions.jsonl | 仅本项目 leader（单写者） | `>>` 追加单行（O_APPEND）。leader 是串行执行工具调用的单写者，无写写竞争。 |
-| answers.jsonl / panel.jsonl | 面板（可能多个实例 / 多个 goroutine） | 进程内按文件的 `sync.Mutex` + 跨进程 `flock(<file>.lock, LOCK_EX)`，锁等待可取消、最长 3s（不阻塞其他项目的读取；panel.jsonl 的写入不在 service 全局锁内）；文件以 `O_RDWR|O_APPEND|O_CREATE` 打开，持锁后先把最后一个换行之后的残片（崩溃或短写留下的半行）截掉，再**每行一次 `write` 调用**（先在内存拼好含 `\n` 的完整行），写后 `fsync`。 |
+| answers.jsonl / panel.jsonl | 面板（可能多个实例 / 多个 goroutine） | 进程内按文件的单槽信号量（可取消）+ 跨进程 `flock(<file>.lock, LOCK_EX)` 非阻塞轮询；两段排队共用一个 deadline（最长 3s）并响应调用方取消（不阻塞其他项目的读取；panel.jsonl 的写入不在 service 全局锁内）；首次创建锁文件/数据文件时若输掉并发创建竞争（Go 1.24 `os.Root` 在 darwin 上会报 ENOENT）有限次重试；文件以 `O_RDWR|O_APPEND|O_CREATE` 打开，持锁后先把最后一个换行之后的残片（崩溃或短写留下的半行）截掉，再**每行一次 `write` 调用**（先在内存拼好含 `\n` 的完整行），写后 `fsync`。 |
 | reports/ | worker | 各任务独立目录；面板只读。 |
 
 读侧一致性：

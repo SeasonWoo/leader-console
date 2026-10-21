@@ -73,6 +73,22 @@ func dropPartialTail(f *os.File) error {
 	return f.Truncate(0)
 }
 
+// openCreate retries O_CREATE opens that lose a concurrent create race: on darwin
+// os.Root.OpenFile (Go 1.24) can then fail with ENOENT although the file exists.
+func openCreate(ctx context.Context, open func(string, int, os.FileMode) (*os.File, error), path string, flag int) (*os.File, error) {
+	for try := 0; ; try++ {
+		f, err := open(path, flag, 0600)
+		if err == nil || !errors.Is(err, os.ErrNotExist) || try == 20 {
+			return f, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
 func appendLine(ctx context.Context, open func(string, int, os.FileMode) (*os.File, error), path, lockPath string, line []byte) error {
 	line = bytes.TrimSuffix(line, []byte{'\n'})
 	if bytes.ContainsAny(line, "\r\n") {
@@ -81,7 +97,7 @@ func appendLine(ctx context.Context, open func(string, int, os.FileMode) (*os.Fi
 	if path == lockPath {
 		return errors.New("jsonl: data and lock paths must differ")
 	}
-	lock, err := open(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
+	lock, err := openCreate(ctx, open, lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK)
 	if err != nil {
 		return err
 	}
@@ -93,7 +109,7 @@ func appendLine(ctx context.Context, open func(string, int, os.FileMode) (*os.Fi
 		return err
 	}
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) // Closing also releases the lock.
-	f, err := open(path, os.O_RDWR|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
+	f, err := openCreate(ctx, open, path, os.O_RDWR|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK)
 	if err != nil {
 		return err
 	}

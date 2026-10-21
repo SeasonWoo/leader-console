@@ -576,3 +576,94 @@ func TestAppendPanelLockWaitIsBounded(t *testing.T) {
 		t.Fatalf("append not bounded: %v after %v", err, time.Since(start))
 	}
 }
+
+// Review 2 N2: a second writer of the same file queued behind the first must honour
+// its own deadline/cancellation, and the deadline covers the whole wait.
+func TestAppendQueueBehindSameFileIsCancellable(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	lock, err := os.OpenFile(filepath.Join(root, "demo", "panel.jsonl.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	firstCtx, cancelFirst := context.WithCancel(bg)
+	defer cancelFirst()
+	first := make(chan error, 1)
+	go func() {
+		first <- f.AppendPanel(firstCtx, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	}()
+	time.Sleep(30 * time.Millisecond) // the first writer now holds the in-process slot
+
+	ctx, cancel := context.WithTimeout(bg, 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = f.AppendPanel(ctx, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("queued writer: %v after %v", err, time.Since(start))
+	}
+	cancelled, stop := context.WithCancel(bg)
+	second := make(chan error, 1)
+	go func() {
+		second <- f.AppendPanel(cancelled, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	}()
+	time.Sleep(20 * time.Millisecond)
+	stop()
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("queued writer ignored cancellation")
+	}
+	select {
+	case <-first:
+		t.Fatal("first writer finished while the flock is held")
+	default:
+	}
+	// Releasing the cross-process lock lets the first writer through.
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if pd := load(t, f, "demo"); len(pd.Panel.Reports) != 1 {
+		t.Fatalf("reports = %+v", pd.Panel.Reports)
+	}
+}
+
+// Two FS instances (two panels, or panel restarts racing) append answers to a file
+// whose lock does not exist yet; nothing may be lost.
+func TestAppendAnswerTwoInstancesFirstCreate(t *testing.T) {
+	for round := 0; round < 5; round++ {
+		f1, root := fixture(t, FSOptions{})
+		f2, _ := NewFS(root, FSOptions{})
+		remove(t, filepath.Join(root, "demo", "answers.jsonl"))
+		var wg sync.WaitGroup
+		errs := make(chan error, 40)
+		for i := 0; i < 20; i++ {
+			for j, fs := range []*FS{f1, f2} {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					id := fmt.Sprintf("a-%d-%d", j, i)
+					errs <- fs.AppendAnswer(bg, "demo", model.AnswerLine{Type: model.LineAnswer, AnswerID: id, DecisionID: "d", Option: "A", At: time.Now()})
+				}()
+			}
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+		if pd := load(t, f1, "demo"); len(pd.Answers) != 40 || len(pd.Warnings) != 0 {
+			t.Fatalf("round %d: answers=%d warnings=%v", round, len(pd.Answers), pd.Warnings)
+		}
+	}
+}

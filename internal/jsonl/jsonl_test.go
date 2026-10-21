@@ -302,3 +302,36 @@ func TestAppendLockWaitIsCancellable(t *testing.T) {
 		t.Fatal("wrote without the lock")
 	}
 }
+
+// Review 2 §3: concurrent first appends through separate os.Root handles race to
+// create the lock file; on darwin the losers saw ENOENT and dropped their line.
+func TestAppendConcurrentFirstCreate(t *testing.T) {
+	for round := 0; round < 30; round++ {
+		dir := t.TempDir()
+		var wg sync.WaitGroup
+		errs := make(chan error, 4)
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				root, err := os.OpenRoot(dir)
+				if err != nil {
+					errs <- err
+					return
+				}
+				defer root.Close()
+				errs <- AppendRoot(root, "a.jsonl", "a.jsonl.lock", []byte("{}"))
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+		if lines, err := ReadLines(filepath.Join(dir, "a.jsonl")); err != nil || len(lines) != 4 {
+			t.Fatalf("round %d: %d lines, %v", round, len(lines), err)
+		}
+	}
+}

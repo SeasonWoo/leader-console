@@ -11,7 +11,8 @@ type PanelLine struct {
 	Type PanelLineType `json:"type"`
 	At   time.Time     `json:"at"`
 
-	// Type=report
+	// Type=report：同一次尝试的意图行与结果行共用 ID（重放或重复写入时按 ID 折叠）。
+	ID       string         `json:"id,omitempty"`
 	Delivery DeliveryStatus `json:"delivery,omitempty"`
 	Target   string         `json:"target,omitempty"`
 	Error    string         `json:"error,omitempty"`

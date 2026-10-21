@@ -27,6 +27,8 @@ type fakeStore struct {
 	listErr, loadErr, appendErr, reportErr error
 	panelErr                               error
 	panelFail                              func(model.PanelLine) error
+	panelHook                              func(model.PanelLine)       // runs before the append, without f.mu (simulates a slow lock wait)
+	panelPostErr                           func(model.PanelLine) error // runs after the line landed (write ok, fsync failed)
 	panel                                  []model.PanelLine
 	report                                 []byte
 	refs                                   []model.ReportRef
@@ -92,6 +94,9 @@ func (f *fakeStore) AppendAnswer(_ context.Context, p string, l model.AnswerLine
 	return nil
 }
 func (f *fakeStore) AppendPanel(_ context.Context, p string, l model.PanelLine) error {
+	if f.panelHook != nil {
+		f.panelHook(l)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.panelErr != nil {
@@ -113,6 +118,9 @@ func (f *fakeStore) AppendPanel(_ context.Context, p string, l model.PanelLine) 
 		pd.Panel.Leaders = append(pd.Panel.Leaders, l)
 	}
 	pd.Version = fmt.Sprint("p", len(f.panel))
+	if f.panelPostErr != nil {
+		return f.panelPostErr(l)
+	}
 	return nil
 }
 func (f *fakeStore) panelLines(kind model.PanelLineType) []model.PanelLine {

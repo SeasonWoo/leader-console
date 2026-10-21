@@ -239,6 +239,7 @@ summary 一句话，不要粘贴凭证、token 或大段日志。
    不存在或包含 `<project>`，说明面板会给本项目定时投递【定期汇报】：不要创建定期汇报 cron，CronList 里已有的用 CronDelete 删掉。
    否则（面板不可达、未开启或本项目不在范围内）：Claude 用 CronList 检查，没有就用 CronCreate 创建（cron `*/10 * * * *`，
    prompt `【定期汇报】`，recurring）；Codex 没有会话内定时，在对话里提醒用户一次“本项目没有定时汇报”。
+   面板可用时再看 overview 中本项目的 `leader.report` 非 null（白名单拼错、协议版本不符时它为 null），否则同样按“不在范围内”处理。
    面板之后停机或关闭调度时不会自动重建 cron：leader 会在面板显示离线，由用户重启面板或在对话里唤醒 leader（leader 重启时会重新执行本步）。
 ```
 
@@ -260,7 +261,9 @@ summary 一句话，不要粘贴凭证、token 或大段日志。
    herdr_name, pane_id, session_id（仅当 herdr 返回了 agent_session.value 才写）}……
 ```
 
-说明：没有 session_id 时，面板只按名字识别 leader，名字丢失后不会按 pane 兜底（同 pane 的替换进程无法区分），所以 A4 的名字核对对 Codex 是必需的。
+说明：没有 session_id 时，面板只按名字识别 leader，名字丢失后不会按 pane 兜底（同 pane 的替换进程无法区分），
+也就无法再给它投定期汇报——A4 的名字核对只能防患于未然，丢名之后的恢复要靠用户（手动 rename 或在对话里唤醒 leader），
+见 [leader-switch.md 1.6](leader-switch.md)。
 
 **A4【修改】定期汇报第 1 步**——名字丢失的兜底（roadmap P2 协议侧）：
 

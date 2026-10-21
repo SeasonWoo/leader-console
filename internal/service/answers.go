@@ -265,7 +265,7 @@ func (s *Service) deliverOne(ctx context.Context, j deliveryJob) {
 		// while the network call was in flight. Never prompt that stale target.
 		s.mu.Lock()
 		current, decision, answer, presence, ready := s.prepare(ctx, j)
-		ready = ready && presence.Online && presence.Target == p.Target && current.Leader != nil && identityMatches(current.Leader, p.Target, agent)
+		ready = ready && protocolAvailable(current) && presence.Online && presence.Target == p.Target && identityMatches(current.Leader, p.Target, agent)
 		if ready {
 			pd = current
 			d = decision

@@ -74,8 +74,11 @@ curl -s http://127.0.0.1:7788/healthz | jq .report_scheduler
 # 需要 enabled=true，且 projects 不存在（=全部项目）或包含 <P>
 curl -s http://127.0.0.1:7788/api/v1/overview | jq --arg p "$P" '.projects[] | select(.name==$p) | .leader.report'
 # 必须非 null（null 表示本项目不在调度范围，或不是 lc-1 项目）
-test -w "$D" && echo writable   # 面板要往 $D/panel.jsonl 写投递记录；写不进去时它不会投递（fail closed）
+test -w "$D" && echo writable   # 只说明目录权限，不代表已有的 panel.jsonl / 锁文件可写、磁盘有空间
 ```
+
+面板运行起来后，以 `leader.report.waiting` / `leader.report.last_error` 为准：出现 `audit_failed` / `audit_pending` 说明 panel.jsonl 写不进去，
+面板此时不会投递（fail closed），要先处理权限或磁盘。
 
 ## 1. Claude → Codex
 
@@ -123,8 +126,10 @@ test -w "$D" && echo writable   # 面板要往 $D/panel.jsonl 写投递记录；
 
    ```bash
    jq -s 'group_by(.id) | map(last) | map(select(.status=="open" or .status=="answered")) | map({id, status, answer})' "$D/decisions.jsonl"
-   jq -c 'select(.type|startswith("decision_")) | {type, decision_id, answer_id, ts}' "$D/events.jsonl" | tail -n 50
+   jq -c 'select(.type|startswith("decision_")) | {type, decision_id, answer_id, ts}' "$D/events.jsonl"
    ```
+
+   以上只是查找示例；核对必须覆盖 events.jsonl 全量（较早的 executing/done 同样要按 decision_id/answer_id 匹配），不能只看最近几十行。
 
 6. **验证面板已识别**
 
@@ -141,7 +146,9 @@ test -w "$D" && echo writable   # 面板要往 $D/panel.jsonl 写投递记录；
    常见异常：
    - `reason=agent_kind_mismatch`：现场 agent 是 codex，但 leader.json 还写着 claude → 新 leader 还没完成第 4 步。
    - `reason=agent_not_found`：herdr 里没有叫 `herdr_name` 的 agent。Codex 没有 session，名字丢了面板不会按 pane 兜底，
-     需要新 leader 执行 `herdr agent rename "$HERDR_PANE_ID" <herdr_name>`。
+     **也就送不进定期汇报**，所以不能指望 leader 在“下一次汇报”里自己改回名字（A4 对此失效）。需要用户恢复：
+     在任意 pane 执行 `herdr agent rename <pane_id> <herdr_name>`，或直接在 leader 的 pane 里对它说“按 leader.json 恢复 herdr 名字”。
+     恢复后约 5 秒内面板重新识别，排队的回答随之投出。
    - `reason=identity_mismatch`：cwd 不一致（Codex 不在项目目录启动）。按名字识别时，只有双方都带 session 且不同才会因 session 判不符；
      现场 Codex 没有 session，所以 leader.json 残留旧 session_id 不一定报错，但它会让名字丢失后的兜底和后续诊断出错——仍要求新 leader 整体替换 leader 对象。
    - `report.waiting=audit_failed` / `audit_pending`：面板写不进 `$D/panel.jsonl`，汇报暂停（不会重复输入），检查目录权限和磁盘。
@@ -177,7 +184,7 @@ leader.json 里看不出“换了人”，所以接管核对必须由显式的�
 
 - 新 leader 起不来：回答和汇报一直排队，不会投给别的 agent；在原 pane 重新启动原来的 leader，同样做接管核对。
 - 想彻底关掉面板的定时汇报：重启面板加 `-leader-reports off`（leader 自己的 cron 不受影响；面板仍会记录 leader 身份变化）。
-- 只对部分项目开：`-leader-reports projA,projB`（写错或写空会启动失败，不会退化成全部项目）。
+- 只对部分项目开：`-leader-reports projA,projB`（列表为空或项目名不合法会启动失败，不会退化成全部项目；拼错但合法的项目名不会报错，只是匹配不到——用 0.3 的 `report` 非 null 检查确认）。
 
 ## 附录：Codex 适配层（建议文本，放进 profile 的 developer_instructions）
 
@@ -191,16 +198,23 @@ leader.json 里看不出“换了人”，所以接管核对必须由显式的�
   名字优先沿用 leader.json 的 leader.herdr_name；当前名字不同就 `herdr agent rename "$HERDR_PANE_ID" <名字>`；
   该名字正被别的 pane 占用时不要抢，告诉用户。
 - leader.json：整体替换 leader 对象，leader.agent 写 "codex"；herdr 拿不到 Codex 的 session，**不写 session_id**。
-  名字一旦丢失面板就找不到你（没有 session 不做 pane 兜底），所以每次定期汇报都核对名字。
+  名字一旦丢失面板就找不到你（没有 session 不做 pane 兜底），也送不进定期汇报；每次定期汇报都核对名字，
+  用户在对话里提到“面板显示 leader 离线”时第一件事也是核对并恢复名字。
 - 定时：不要尝试创建定时任务。【定期汇报】由 leader-console 面板投递。启动时检查
   `curl -fsS http://127.0.0.1:7788/healthz` 的 report_scheduler：enabled 为 true，且 projects 不存在或包含 <project>；
-  否则（面板不可达、未开启或本项目不在范围内）在对话里提醒用户一次：本项目将没有定时汇报。
+  再检查 `curl -fsS http://127.0.0.1:7788/api/v1/overview` 中本项目的 leader.report 非 null、report.waiting 不是 audit_failed / audit_pending。
+  任何一项不满足（面板不可达、未开启、本项目不在范围内、panel.jsonl 写不进去）就在对话里提醒用户一次：本项目将没有定时汇报。
 - 事件监听：不要挂后台 `herdr agent wait`（回合结束后后台命令完成不会唤醒你）。派发时用
   `herdr agent prompt ... --wait --until working --timeout 30000` 确认开工即可。每次定期汇报对账时检查 state.json 中所有活跃任务
   （working / reviewing / blocked / needs_user）：
-  - herdr 状态为 idle / done 的 working、reviewing 任务：按“事件监听”的 idle/done 规则验收；
-  - herdr 状态为 blocked 的：按 blocked 规则处理；已为它建过 open 决策的不要重复建；
-  - needs_user 的：对应决策已有回答（answers.jsonl）就按决策回传处理，否则保持等待，不重复通知；
+  - state 为 working / reviewing、herdr 状态为 idle / done：按“事件监听”的 idle/done 规则验收；
+  - state 为 blocked、herdr 状态仍是 blocked：按 blocked 规则处理；已为它建过 open 决策的不要重复建；
+  - state 为 blocked、herdr 状态已是 idle / done（用户直接在 worker 里解了阻塞，worker 已做完）：读 worker 输出和报告，
+    按 idle/done 规则验收，并追加 unblocked 事件；不要再为它建阻塞决策；
+  - state 为 blocked、herdr 状态是 working：已被解阻在跑，改回 working 并追加 unblocked 事件；
+  - state 为 needs_user：对应决策仍 open 且 answers.jsonl 有回答 → 按决策回传处理；决策已 answered 但没有 decision_executing，
+    或 executing 未 done → 按接管核对的类别 ②/③ 核对现场后续办（不能因为“决策回传幂等检查”认为已处理就跳过）；
+    没有回答 → 保持等待，不重复通知；
   - 接管时已经处于 blocked / needs_user 的任务同样按上面规则核对一次。
 - 通知用户：没有 PushNotification。改为 `herdr notification show "<一行摘要>" --sound request`，其余步骤不变。
 - 启动接管：leader.json 的 leader.agent / pane_id / session_id 与自己不同，**或者收到【leader 接管】提示**，都视为接管：

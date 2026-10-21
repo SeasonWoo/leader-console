@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
@@ -47,11 +49,13 @@ func (s *Service) reportsFor(project string) bool {
 // still waiting to be persisted, so a restart resumes the same cycle instead of
 // replaying missed ones:
 //
-//   - every report attempt is bracketed by an intent line (delivery=queued) written
-//     before the prompt and a result line after it. delivered/failed, and an intent
-//     whose result is unknown (crash, audit failure), consume the cycle: the panel never
-//     types twice into one cycle. Only retry, written when herdr refused the prompt
-//     (agent blocked / not found, nothing typed), cancels its intent;
+//   - every report attempt has an ID shared by its intent line (delivery=queued, written
+//     before the prompt) and its result line. Lines are folded per attempt, so a result
+//     written twice (an append that landed but reported an error, then the audit retry)
+//     still counts once;
+//   - delivered/failed, and an intent whose result is unknown (crash, audit failure),
+//     consume the cycle: the panel never types twice into one cycle. Only retry, written
+//     when nothing was typed (herdr refused, or the final gate failed), cancels it;
 //   - a cycle starts at the later of heartbeat_at (the leader handled a report or an
 //     answer) and the last consumed attempt; the next report is due one interval
 //     (+ grace) later. Each further report the leader has not acknowledged by
@@ -72,30 +76,23 @@ func (s *Service) reportPlan(pd *model.ProjectData) (model.ReportSchedule, bool)
 			base = at
 		}
 	}
-	var intent *model.PanelLine
-	for _, l := range append(append([]model.PanelLine(nil), pd.Panel.Reports...), s.reportAudit[pd.Name]...) {
-		switch l.Delivery {
-		case model.DeliveryQueued:
-			if intent != nil {
-				consume(intent.At) // an earlier attempt's result was never recorded
-			}
-			intent = &l
+	for _, a := range reportAttempts(append(append([]model.PanelLine(nil), pd.Panel.Reports...), s.reportAudit[pd.Name]...)) {
+		if a.result == nil {
+			consume(a.intent.At)
 			continue
+		}
+		switch a.result.Delivery {
 		case model.DeliveryDelivered:
-			at := l.At
+			at := a.result.At
 			plan.LastSentAt = &at
-			if l.At.After(li.HeartbeatAt) {
+			if at.After(li.HeartbeatAt) {
 				plan.Unacked++
 			}
-			consume(l.At)
+			consume(at)
 		case model.DeliveryFailed:
-			consume(l.At)
+			consume(a.result.At)
 		}
-		intent = nil
-		plan.LastError = l.Error
-	}
-	if intent != nil {
-		consume(intent.At)
+		plan.LastError = a.result.Error
 	}
 	mult := 1
 	if plan.Unacked > 1 {
@@ -107,6 +104,51 @@ func (s *Service) reportPlan(pd *model.ProjectData) (model.ReportSchedule, bool)
 	}
 	plan.NextDueAt = due
 	return plan, true
+}
+
+type reportAttempt struct{ intent, result *model.PanelLine }
+
+// reportAttempts folds report lines by attempt ID in first-seen order. Lines without
+// an ID are treated as attempts of their own.
+func reportAttempts(lines []model.PanelLine) []reportAttempt {
+	var order []string
+	byID := map[string]*reportAttempt{}
+	for i := range lines {
+		l := &lines[i]
+		id := l.ID
+		if id == "" {
+			id = fmt.Sprint("#", i)
+		}
+		a := byID[id]
+		if a == nil {
+			a = &reportAttempt{}
+			byID[id] = a
+			order = append(order, id)
+		}
+		if l.Delivery == model.DeliveryQueued {
+			if a.intent == nil {
+				a.intent = l
+			}
+		} else {
+			a.result = l
+		}
+	}
+	out := make([]reportAttempt, 0, len(order))
+	for _, id := range order {
+		if a := byID[id]; a.intent != nil || a.result != nil {
+			if a.intent == nil {
+				a.intent = a.result
+			}
+			out = append(out, *a)
+		}
+	}
+	return out
+}
+
+func newAttemptID(now time.Time) string {
+	var b [3]byte
+	_, _ = rand.Read(b[:])
+	return "rp-" + now.UTC().Format("20060102-150405") + "-" + hex.EncodeToString(b[:])
 }
 
 // reports runs one scheduler pass. It shares the delivery worker, so a report and an
@@ -172,6 +214,55 @@ func (s *Service) waitReport(project, reason string) {
 	}
 }
 
+// reportGate is one complete check right before acting: a live `herdr agent get`,
+// then under s.mu a fresh leader.json, the shared identity rule and the input state.
+// snap pins the registration and heartbeat_at seen when the attempt was decided; the
+// gate fails if either moved (leader switched, or its own cron handled a report).
+// withDue also requires the report to be due; after the intent is written that check
+// is replaced by the pinned heartbeat, because the intent itself consumes the cycle.
+// It returns "" when the report may be typed now, otherwise the reason to wait.
+func (s *Service) reportGate(ctx context.Context, project string, snap *model.LeaderInfo, target string, withDue bool) string {
+	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	agent, err := s.deps.Herdr.Get(callCtx, target)
+	cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case err != nil || !identityMatches(snap, target, agent):
+		return "not_identified"
+	case agent.AgentStatus == "blocked":
+		return "leader_blocked"
+	case !acceptsInput(agent.AgentStatus):
+		return "leader_busy"
+	}
+	pd, err := s.loadLocked(ctx, project)
+	if err != nil {
+		return "not_identified"
+	}
+	s.projects[project] = pd
+	if !protocolAvailable(pd) || !s.reportsFor(project) || pd.Leader.Leader != snap.Leader || pd.Leader.Cwd != snap.Cwd {
+		return "not_identified"
+	}
+	if !pd.Leader.HeartbeatAt.Equal(snap.HeartbeatAt) {
+		return "not_due"
+	}
+	if withDue {
+		if plan, _ := s.reportPlan(pd); s.deps.Now().Before(plan.NextDueAt) {
+			return "not_due"
+		}
+	}
+	presence, _ := s.deps.Reconcile(clone(pd), append([]herdr.Agent(nil), s.agents...), s.health.OK, s.deps.Now())
+	switch {
+	case !presence.Identified || presence.Target != target || !identityMatches(pd.Leader, target, agent):
+		return "not_identified"
+	case presence.AgentStatus == "blocked":
+		return "leader_blocked"
+	case !acceptsInput(presence.AgentStatus):
+		return "leader_busy"
+	}
+	return ""
+}
+
 func (s *Service) reportOne(ctx context.Context, project string) {
 	s.mu.Lock()
 	if len(s.reportAudit[project]) > 0 {
@@ -186,39 +277,18 @@ func (s *Service) reportOne(ctx context.Context, project string) {
 		s.mu.Unlock()
 		return
 	}
-	expected := clone(pd.Leader)
+	snap, target := clone(pd.Leader), p.Target
 	s.mu.Unlock()
-	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	agent, err := s.deps.Herdr.Get(callCtx, p.Target)
-	cancel()
-	s.mu.Lock()
-	switch {
-	case err != nil || !identityMatches(expected, p.Target, agent):
-		wait = "not_identified"
-	case agent.AgentStatus == "blocked":
-		wait = "leader_blocked"
-	case !acceptsInput(agent.AgentStatus):
-		wait = "leader_busy"
-	}
-	if wait == "" {
-		// Recheck after Get: the leader may have refreshed heartbeat_at (its own cron
-		// fired) or been replaced while the call was in flight.
-		var current *model.ProjectData
-		var presence model.LeaderPresence
-		current, presence, wait = s.reportReady(ctx, project)
-		if wait == "" && (presence.Target != p.Target || !identityMatches(current.Leader, p.Target, agent)) {
-			wait = "not_identified"
-		}
-	}
-	if wait != "" {
+	if wait = s.reportGate(ctx, project, snap, target, true); wait != "" {
+		s.mu.Lock()
 		s.waitReport(project, wait)
 		s.mu.Unlock()
 		return
 	}
-	s.mu.Unlock()
 	// The intent is durable before anything is typed; if it cannot be written the
 	// panel cannot guarantee one report per cycle, so it does not prompt at all.
-	intent := model.PanelLine{Type: model.PanelReport, At: s.deps.Now(), Delivery: model.DeliveryQueued, Target: p.Target}
+	id := newAttemptID(s.deps.Now())
+	intent := model.PanelLine{Type: model.PanelReport, ID: id, At: s.deps.Now(), Delivery: model.DeliveryQueued, Target: target}
 	if err := s.appendPanel(ctx, project, intent); err != nil {
 		s.mu.Lock()
 		if ctx.Err() == nil {
@@ -227,30 +297,40 @@ func (s *Service) reportOne(ctx context.Context, project string) {
 		s.mu.Unlock()
 		return
 	}
-	promptCtx, stop := context.WithTimeout(ctx, 10*time.Second)
-	err = s.deps.Herdr.Prompt(promptCtx, p.Target, reportText(project))
-	stop()
-	result := model.PanelLine{Type: model.PanelReport, At: s.deps.Now(), Delivery: model.DeliveryDelivered, Target: p.Target}
-	refused := ""
-	var he *herdr.Error
-	switch {
-	case errors.As(err, &he) && he.Code == herdr.CodeAgentBlocked:
-		result.Delivery, refused = model.DeliveryRetry, "leader_blocked"
-	case errors.As(err, &he) && he.Code == herdr.CodeAgentNotFound:
-		result.Delivery, refused = model.DeliveryRetry, "not_identified"
-	case err != nil:
-		// Timeouts and stalls may have typed the text: the outcome is unknown, so the
-		// cycle counts as used.
-		result.Delivery = model.DeliveryFailed
+	result := model.PanelLine{Type: model.PanelReport, ID: id, Delivery: model.DeliveryDelivered, Target: target}
+	// The append may have waited seconds for the file lock: check everything again.
+	wait = s.reportGate(ctx, project, snap, target, false)
+	if wait == "" && ctx.Err() != nil {
+		wait = "not_identified"
 	}
-	if err != nil {
-		result.Error = s.deps.Redact(cleanTerminal(err.Error()))
+	if wait != "" {
+		// Nothing was typed: settle this intent as not sent so it does not use the cycle.
+		result.Delivery, result.Error = model.DeliveryRetry, "not sent: "+wait
+	} else {
+		promptCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		err := s.deps.Herdr.Prompt(promptCtx, target, reportText(project))
+		stop()
+		var he *herdr.Error
+		switch {
+		case errors.As(err, &he) && he.Code == herdr.CodeAgentBlocked:
+			result.Delivery, wait = model.DeliveryRetry, "leader_blocked"
+		case errors.As(err, &he) && he.Code == herdr.CodeAgentNotFound:
+			result.Delivery, wait = model.DeliveryRetry, "not_identified"
+		case err != nil:
+			// Timeouts and stalls may have typed the text: the outcome is unknown, so the
+			// cycle counts as used.
+			result.Delivery = model.DeliveryFailed
+		}
+		if err != nil {
+			result.Error = s.deps.Redact(cleanTerminal(err.Error()))
+		}
 	}
-	// Even if ctx was cancelled after the prompt, remember the outcome in memory first.
+	result.At = s.deps.Now()
+	// Remember the outcome in memory before writing it (even if ctx is cancelled).
 	s.mu.Lock()
 	s.reportAudit[project] = append(s.reportAudit[project], result)
-	if refused != "" {
-		s.waitReport(project, refused)
+	if wait != "" {
+		s.waitReport(project, wait)
 	}
 	s.mu.Unlock()
 	s.flushReportAudit(ctx, project)
@@ -260,12 +340,21 @@ func (s *Service) reportOne(ctx context.Context, project string) {
 func (s *Service) flushReportAudit(ctx context.Context, project string) {
 	s.mu.Lock()
 	pending := append([]model.PanelLine(nil), s.reportAudit[project]...)
+	persisted := map[string]bool{}
+	if pd, err := s.loadLocked(ctx, project); err == nil {
+		for _, l := range pd.Panel.Reports {
+			persisted[l.ID+"/"+string(l.Delivery)] = l.ID != ""
+		}
+	}
 	s.mu.Unlock()
 	written := 0
 	var err error
 	for _, line := range pending {
-		if err = s.appendPanel(ctx, project, line); err != nil {
-			break
+		// An earlier append may have landed although it reported an error.
+		if !persisted[line.ID+"/"+string(line.Delivery)] {
+			if err = s.appendPanel(ctx, project, line); err != nil {
+				break
+			}
 		}
 		written++
 	}
