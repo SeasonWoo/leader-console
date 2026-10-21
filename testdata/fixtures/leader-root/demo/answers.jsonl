@@ -1,0 +1,2 @@
+{"type":"answer","answer_id":"a-20261021-160012-7f3c","at":"2026-10-21T16:00:12+08:00","decision_id":"d-20261021-002","option":"B","text":"mock 放在 fe/mocks 下","by":"panel","client_request_id":"c-1a2b3c"}
+{"type":"delivery","answer_id":"a-20261021-160012-7f3c","at":"2026-10-21T16:00:13+08:00","delivery":"delivered","attempt":1,"target":"leader-demo"}

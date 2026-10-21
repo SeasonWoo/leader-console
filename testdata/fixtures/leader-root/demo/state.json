@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "project": "demo",
+  "updated_at": "2026-10-21T15:55:00+08:00",
+  "tasks": [
+    {
+      "id": "uih-copilot",
+      "name": "uih-copilot",
+      "kind": "codex",
+      "role": "impl",
+      "agent_name": "uih-copilot",
+      "pane_id": "w1:pP",
+      "repo": "copilot_marscode",
+      "branch": "feat/user-identity-header",
+      "worktree": "/Users/me/.herdr/worktrees/copilot_marscode/feat-uih",
+      "goal": "copilot 侧 header 生效范围",
+      "status": "ready_to_merge",
+      "result_summary": "评审可提交；2 条补测试建议已处理；等用户授权提交和提 MR",
+      "reports": ["reports/uih-copilot/report.md"],
+      "links": [{"type": "mr", "title": "MR !6600", "url": "https://code.example.com/mr/6600"}],
+      "rework_count": 1,
+      "created_at": "2026-10-21T14:45:00+08:00",
+      "updated_at": "2026-10-21T15:55:00+08:00",
+      "started_at": "2026-10-21T14:46:00+08:00"
+    },
+    {
+      "id": "rv-copilot",
+      "name": "rv-copilot",
+      "kind": "claude",
+      "role": "review",
+      "parent_id": "uih-copilot",
+      "agent_name": "rv-copilot",
+      "pane_id": "w1:pS",
+      "goal": "评审 uih-copilot",
+      "status": "done",
+      "result_summary": "可提交；2 条补测试建议",
+      "created_at": "2026-10-21T15:20:00+08:00",
+      "updated_at": "2026-10-21T15:45:00+08:00"
+    },
+    {
+      "id": "uih-fe",
+      "name": "uih-fe",
+      "kind": "claude",
+      "role": "impl",
+      "agent_name": "uih-fe",
+      "pane_id": "w1:pR",
+      "goal": "前端阶段一",
+      "status": "working",
+      "created_at": "2026-10-21T14:45:00+08:00",
+      "updated_at": "2026-10-21T15:50:00+08:00",
+      "started_at": "2026-10-21T14:47:00+08:00"
+    }
+  ]
+}

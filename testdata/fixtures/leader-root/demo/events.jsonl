@@ -1,0 +1,7 @@
+{"ts":"2026-10-21T14:45:00+08:00","type":"dispatched","actor":"leader","task_id":"uih-copilot","summary":"派发给 codex（w1:pP）"}
+{"ts":"2026-10-21T15:20:00+08:00","type":"review_requested","actor":"leader","task_id":"uih-copilot","summary":"派 rv-copilot 交叉评审"}
+{"ts":"2026-10-21T15:45:00+08:00","type":"review_passed","actor":"rv-copilot","task_id":"uih-copilot","summary":"可提交；2 条补测试建议"}
+{"ts":"2026-10-21T15:55:00+08:00","type":"decision_opened","actor":"leader","task_id":"uih-copilot","decision_id":"d-20261021-001","summary":"是否授权提交并提 MR"}
+{"ts":"2026-10-21T15:56:00+08:00","type":"decision_opened","actor":"leader","task_id":"uih-fe","decision_id":"d-20261021-002","summary":"阶段二是否等 BAM"}
+{"ts":"2026-10-21T16:00:20+08:00","type":"decision_ack","actor":"leader","task_id":"uih-fe","decision_id":"d-20261021-002","answer_id":"a-20261021-160012-7f3c","summary":"收到：B 先用 mock 开工"}
+{"ts":"2026-10-21T16:00:40+08:00","type":"decision_executing","actor":"leader","task_id":"uih-fe","decision_id":"d-20261021-002","answer_id":"a-20261021-160012-7f3c","summary":"已通知 uih-fe 用 mock 开工阶段二"}

@@ -1,0 +1,16 @@
+# build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# local runtime state / config
+/.local/
+*.log
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "protocol_version": "lc-1",
+  "project": "demo",
+  "title": "用户身份 header 生效范围",
+  "cwd": "/Users/me/work/dev/tasks/demo",
+  "leader": {
+    "agent": "claude",
+    "herdr_name": "leader-demo",
+    "pane_id": "w1:pA",
+    "session_id": "e4916e66-03ee-408d-88c3-ff6c201bf695"
+  },
+  "started_at": "2026-10-21T09:00:00+08:00",
+  "heartbeat_at": "2026-10-21T15:50:00+08:00",
+  "report_interval_min": 10
+}
