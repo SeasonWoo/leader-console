@@ -42,6 +42,7 @@ curl -s http://127.0.0.1:7788/api/v1/overview   # 项目、leader 在线状态�
 ## 使用说明
 
 - **数据来源**：每 `-scan-interval` 扫描一次 `<leader-root>/*/`。有 `state.json` 的项目按 leader 协议读取（`leader.json`、`decisions.jsonl`、`events.jsonl`、`answers.jsonl`、`reports/`）；只有旧格式 `ledger.md` 的项目为**过渡期只读**：任务表照常显示在看板，台账里像“等用户确认”的行显示在“疑似待确认”区，不能在面板作答，请在 leader 对话里回答。
+- **任务摘要**：看板分别展示台账中的任务目标（`goal`）和进展（`result_summary`）；worker 终端标题可能被多个任务共用或沿用旧任务，只在任务详情中以“终端标题”展示，不作为任务摘要。
 - **唯一的写操作**：在“待我决定”作答时追加一行到 `<leader-root>/<project>/answers.jsonl`。其他文件只读。
 - **决策回传**：作答后后台通过 `herdr agent prompt <leader> "【决策回传】…"` 投递给该项目的 leader，投递结果也记在 `answers.jsonl`。leader 离线时回答排队，上线后自动投递；连续失败 5 次标记失败，可在页面上“重试投递”。leader 写入 `decision_ack` / `decision_executing` / `decision_done` 事件后，页面进度条随之推进。
 - **安全**：只接受回环地址和 `Host` 为 127.0.0.1 / localhost / [::1] 的请求；写接口需要进程启动时随机生成的 token（只注入首页 `<meta name="lc-token">`，不打印到日志），并校验 `Origin`。所有展示文本先脱敏，Markdown 渲染为白名单 HTML。

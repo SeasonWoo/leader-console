@@ -79,9 +79,10 @@ function taskCard(tv, showProject) {
   const href = taskHref(tv.project, t.id);
   const failed = t.status === "failed";
   const lost = live.lost || t.status === "lost";
-  let activity = live.activity || "";
-  if (live.lost) activity = "herdr 中找不到 worker";
-  else if (!activity && t.result_summary) activity = t.result_summary;
+  // 终端标题属于 worker，会被多个任务共用，也可能沿用旧任务标题。
+  // 卡片只展示台账中的任务目标与进展，不把终端标题当成任务摘要。
+  const goal = (t.goal || "").trim();
+  const summary = (t.result_summary || "").trim();
 
   const el = h("article", { class: `tcard${lost || failed ? " bad" : ""}`, tabindex: 0, role: "link", dataset: { href } },
     h("div", { class: "trow" },
@@ -94,7 +95,10 @@ function taskCard(tv, showProject) {
       [t.kind, t.role].filter(Boolean).join(" · "),
       showProject ? h("span", { class: "muted", text: ` · ${tv.project}` }) : null,
       live.agent_found && live.agent_status ? h("span", { class: `astatus as-${live.agent_status}`, text: ` · ● ${AGENT_STATUS[live.agent_status] || live.agent_status}` }) : null),
-    activity ? h("div", { class: `tact${live.lost ? " red" : ""}`, title: activity, text: activity }) : null,
+    goal ? h("div", { class: "tact tgoal", title: goal, text: `目标：${goal}` }) : null,
+    summary ? h("div", { class: "tact", title: summary, text: `进展：${summary}` }) : null,
+    !goal && !summary ? h("div", { class: "tact muted", text: "暂无任务摘要" }) : null,
+    live.lost ? h("div", { class: "tact red", text: "herdr 中找不到 worker" }) : null,
     h("div", { class: "tfoot" },
       h("span", { title: "已运行", text: `⏱ ${tv.running_for_sec > 0 ? fmtDuration(tv.running_for_sec) : "—"}` }),
       t.rework_count ? h("span", { text: `返工 ${t.rework_count}` }) : null,

@@ -61,8 +61,9 @@ export function create(root, route, ctx) {
     const rows = [
       ["目标", t.goal],
       ["状态", `${TASK_STATUS[t.status] || t.status}${d.running_for_sec > 0 ? ` · 已运行 ${fmtDuration(d.running_for_sec)}` : ""}`],
-      ["当前", d.live && d.live.lost ? "herdr 中找不到 worker（只展示，不回写台账）" : d.live && d.live.activity],
-      ["结果", t.result_summary],
+      ["进展/结果", t.result_summary],
+      ["worker 状态", d.live && d.live.lost ? "herdr 中找不到 worker（只展示，不回写台账）" : ""],
+      ["终端标题", d.live && d.live.activity ? `${d.live.activity}（worker 会话标题，可能沿用旧任务）` : ""],
       ["仓库/分支", [t.repo, t.branch].filter(Boolean).join(" @ ")],
       ["worktree", t.worktree],
       ["agent", t.agent_name],
