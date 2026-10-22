@@ -1,8 +1,9 @@
 # leader 切换 CLI 操作手册（草稿）
 
 > 场景：Claude 额度用完，需要把某个项目的 leader 从 Claude Code 临时换成 Codex，额度恢复后再切回。
-> 状态：**草稿**。第 0 步里的 Codex profile 和 leader 提示词修改都还没有创建或批准，切换前需要用户先审批；
-> 面板侧能力（定时汇报、按 kind 核验、切换识别）在 `feat/lc-leader-scheduler` 分支，需要用该分支构建的面板。
+> 状态：**草稿**。leader 提示词修改（lc-1 §11 A1–A7）已批准（d-20261022-025）并写入 `~/.claude/agents/leader.md`；
+> 第 0.1 步的 Codex profile **尚未创建**（权限方案待用户选择），切换到 Codex 前需要先完成。
+> 面板侧能力（定时汇报、按 kind 核验、切换识别）已合入 main，7788 已上线（`-report-grace 0s`）。
 > 真实 CLI 行为（`herdr agent start` 复用名字、Codex 从 idle 被 prompt 开回合、退出命令、所选权限下 herdr socket 可达）
 > 尚未在隔离项目中实测，第一次切换请在场观察。
 
@@ -36,7 +37,7 @@
 # ~/.codex/leader.config.toml（示例，未创建）
 model = "gpt-6.1-sol"
 developer_instructions = """
-<leader 核心协议全文>
+<~/.claude/agents/leader.md 中 frontmatter 之后、“# 适配层：Claude”之前的核心协议全文>
 <下方“附录：Codex 适配层”全文>
 """
 ```
@@ -56,18 +57,19 @@ developer_instructions = """
 
 方案 B 启动时还要加 `--add-dir ~/.leader/<P>`，让协议目录可写。
 
-“核心协议”目前只能从 `~/.claude/agents/leader.md` 去掉 frontmatter 复制，协议一改就会漂移；
-建议按 [leader-protocol.md §11 A6](leader-protocol.md) 拆出唯一的核心协议文件，两个 CLI 都引用它。
+A6 已落地：`~/.claude/agents/leader.md` 分为核心协议和末尾的“# 适配层：Claude”，核心协议是唯一来源。
+Codex profile 只取核心协议部分（不要带上“适配层：Claude”），再接本手册附录的 Codex 适配层。
+`developer_instructions` 只能内嵌文本，所以核心协议仍需复制进 profile；leader.md 的核心协议有改动时，要重新生成 profile。
 不要用 `model_instructions_file`（它替换 Codex 内置基础指令）；不要把 leader 角色写进全局 `~/.codex/AGENTS.md`（会污染所有 worker）。
 
 ### 0.2 leader 提示词的 agent 无关化
 
-见 [leader-protocol.md §11](leader-protocol.md) 的 A2/A3/A4/A5：自我识别改用 `$HERDR_PANE_ID`、leader.json 写真实 kind 并整体替换、
-汇报时恢复名字、启动时做接管核对。不改的话 Claude 照常工作，但 Codex 照搬 Claude 的自我识别规则会找不到自己。
+已完成：[leader-protocol.md §11](leader-protocol.md) 的 A1–A7 已批准（d-20261022-025）并写入 `~/.claude/agents/leader.md`——
+自我识别改用 `$HERDR_PANE_ID`、leader.json 写真实 kind 并整体替换、汇报时核对身份并恢复名字、启动时做接管核对、定时来源先看面板。
 
 ### 0.3 面板
 
-用本分支构建的面板运行在 7788，并确认**本项目**确实会被定时投递（Codex 没有 cron，面板不投就没有任何定时唤醒）：
+用 main 构建的面板运行在 7788（已上线），并确认**本项目**确实会被定时投递（Codex 没有 cron，面板不投就没有任何定时唤醒）：
 
 ```bash
 curl -s http://127.0.0.1:7788/healthz | jq .report_scheduler
@@ -174,7 +176,7 @@ test -w "$D" && echo writable   # 只说明目录权限，不代表已有的 pan
    - 建议开新会话，不加 `--continue`：`--continue` 会恢复切换前那个 Claude 会话，它的记忆已经过时。
    - `--permission-mode auto` 要显式写上：auto 模式不会随重启保留。
 3. 发接管提示（同 1.4，把 claude/codex 对调），并做 1.5 的接管核对。Claude leader 写 `leader.agent="claude"` 和 `session_id`，
-   按 leader.md 处理 cron（若 §11 A1 已批准：本项目在面板调度范围内就不再建 CronCreate）。
+   按 leader.md 会话启动第 3 步处理定时来源：本项目在面板调度范围内就不建 CronCreate（已有的删掉），否则建 cron 兜底。
 4. 验证（同 1.6）：期望 `agent="claude"`、`change.switched=true`、`change.from.agent="codex"`、`change.to.agent="claude"`。
 
 同 CLI 换会话（Codex→Codex 或 Claude 新开会话）也走同样的步骤：Codex 前后都没有 session、pane 也可能不变，
@@ -191,17 +193,16 @@ leader.json 里看不出“换了人”，所以接管核对必须由显式的�
 ```markdown
 # 适配层：Codex
 
-以下条目覆盖核心协议里依赖 Claude Code 的部分。
+以下是核心协议中“由适配层提供”的能力在 Codex 上的实现，替代 leader.md 末尾的“# 适配层：Claude”一节；核心协议本身不改。
 
-- 自我识别：当前 pane 是 `$HERDR_PANE_ID`。变量为空、`herdr agent get "$HERDR_PANE_ID"` 失败、或返回的 cwd 不是项目目录 / agent 不是 codex 时，
-  停止注册并在对话里告诉用户，不要退回“找同目录的第一个 agent”。
-  名字优先沿用 leader.json 的 leader.herdr_name；当前名字不同就 `herdr agent rename "$HERDR_PANE_ID" <名字>`；
-  该名字正被别的 pane 占用时不要抢，告诉用户。
+- 启动与恢复：由用户用 `herdr agent start <herdr_name> --kind codex --pane <pane_id> -- -p leader` 启动，并发一条【leader 接管】提示。
+  启动和恢复后都从核心协议“会话启动”第 0 步开始执行。
+- 自己的 CLI 取值：会话启动第 4 步 `herdr agent get "$HERDR_PANE_ID"` 返回的 agent 应为 codex，不符就按第 4 步停止注册。
 - leader.json：整体替换 leader 对象，leader.agent 写 "codex"；herdr 拿不到 Codex 的 session，**不写 session_id**。
   名字一旦丢失面板就找不到你（没有 session 不做 pane 兜底），也送不进定期汇报；每次定期汇报都核对名字，
   用户在对话里提到“面板显示 leader 离线”时第一件事也是核对并恢复名字。
-- 定时：不要尝试创建定时任务。【定期汇报】由 leader-console 面板投递。启动时检查
-  `curl -fsS http://127.0.0.1:7788/healthz` 的 report_scheduler：enabled 为 true，且 projects 不存在或包含 <project>；
+- 定时兜底：Codex 没有会话内定时能力，不要尝试创建定时任务。【定期汇报】由 leader-console 面板投递。会话启动第 3 步检查
+  `curl -fsS http://127.0.0.1:7788/healthz` 的 report_scheduler：enabled 为 true，且 projects 不存在、为空或包含 <project>；
   再检查 `curl -fsS http://127.0.0.1:7788/api/v1/overview` 中本项目的 leader.report 非 null、report.waiting 不是 audit_failed / audit_pending。
   任何一项不满足（面板不可达、未开启、本项目不在范围内、panel.jsonl 写不进去）就在对话里提醒用户一次：本项目将没有定时汇报。
 - 事件监听：不要挂后台 `herdr agent wait`（回合结束后后台命令完成不会唤醒你）。派发时用
@@ -216,7 +217,7 @@ leader.json 里看不出“换了人”，所以接管核对必须由显式的�
     或 executing 未 done → 按接管核对的类别 ②/③ 核对现场后续办（不能因为“决策回传幂等检查”认为已处理就跳过）；
     没有回答 → 保持等待，不重复通知；
   - 接管时已经处于 blocked / needs_user 的任务同样按上面规则核对一次。
-- 通知用户：没有 PushNotification。改为 `herdr notification show "<一行摘要>" --sound request`，其余步骤不变。
-- 启动接管：leader.json 的 leader.agent / pane_id / session_id 与自己不同，**或者收到【leader 接管】提示**，都视为接管：
-  先追加事件 `{"type":"other","summary":"leader 接管：<旧 agent>→codex"}`，再按会话启动流程执行，并完成接管核对（三类决策）。
+- 通知：没有 PushNotification。“通知用户”第 3 步改为 `herdr notification show "<一行摘要>" --sound request`，其余步骤不变。
+- 接管：按核心协议会话启动第 0 步执行（三类决策的接管核对）。Codex 前后都没有 session，同一 pane 换会话时 leader.json 看不出换了人，
+  收到【leader 接管】提示时一律按接管处理。
 ```

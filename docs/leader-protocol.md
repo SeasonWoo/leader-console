@@ -227,16 +227,19 @@ summary 一句话，不要粘贴凭证、token 或大段日志。
 
 ---
 
-## 11. 待审批增补（面板定时汇报 / leader 切换 CLI，**未合入 leader.md**）
+## 11. lc-1 增补（面板定时汇报 / leader 切换 CLI）——**已批准（d-20261022-025）**
 
-> 来源：`feat/lc-leader-scheduler`。面板侧已实现，下列条文需用户批准后才能改 `~/.claude/agents/leader.md`。
-> 不改也能工作：面板默认 `-report-grace 5m`，只在 leader 自己的 cron 迟到 5 分钟以上时补发，作为兜底。
+> 状态：**已批准（d-20261022-025）**，2026-10-22 用户在面板选 A，A1–A7 全部批准，已合入 `~/.claude/agents/leader.md`
+> （修改前备份为 `~/.claude/agents/leader.md.bak-20261022-1027`）。A6 落地方式：leader.md 正文先写与 agent 无关的核心协议，
+> 末尾“# 适配层：Claude”一节放 CronCreate 兜底、`run_in_background` 监听、PushNotification、`--continue` 与 `--permission-mode auto`；
+> Codex 适配层不进 leader.md，见 [leader-switch.md 附录](leader-switch.md)。A1 的配套：7788 面板已改为 `-report-grace 0s`。
+> 来源：`feat/lc-leader-scheduler`（已合入 main）。以下保留审批时的条文原文。
 
 **A1【修改】会话启动第 3 步（cron）**——让面板成为唯一的定时来源，修掉 cron 7 天过期、`--continue` 后丢失，也让 Codex leader 能用：
 
 ```markdown
 3. 执行 `curl -fsS http://127.0.0.1:7788/healthz`。若 `report_scheduler.enabled` 为 true，且 `report_scheduler.projects`
-   不存在或包含 `<project>`，说明面板会给本项目定时投递【定期汇报】：不要创建定期汇报 cron，CronList 里已有的用 CronDelete 删掉。
+   不存在、为空（表示全部项目）或包含 `<project>`，说明面板会给本项目定时投递【定期汇报】：不要创建定期汇报 cron，CronList 里已有的用 CronDelete 删掉。
    否则（面板不可达、未开启或本项目不在范围内）：Claude 用 CronList 检查，没有就用 CronCreate 创建（cron `*/10 * * * *`，
    prompt `【定期汇报】`，recurring）；Codex 没有会话内定时，在对话里提醒用户一次“本项目没有定时汇报”。
    面板可用时再看 overview 中本项目的 `leader.report` 非 null（白名单拼错、协议版本不符时它为 null），否则同样按“不在范围内”处理。
