@@ -224,3 +224,77 @@ summary 一句话，不要粘贴凭证、token 或大段日志。
 - 灰度：先在一个项目上启用（建议新项目），面板同时支持新旧两种数据；旧项目继续用 ledger.md，面板只读展示。
 - 回退：删除 leader.md 中上述条文即可，`~/.leader/<project>/` 下新增文件不影响旧流程（ledger.md 始终保留）。
 - 兼容承诺：面板永远能只读解析 ledger.md；协议文件缺失或损坏时面板降级为只读，不影响 leader 工作。
+
+---
+
+## 11. 待审批增补（面板定时汇报 / leader 切换 CLI，**未合入 leader.md**）
+
+> 来源：`feat/lc-leader-scheduler`。面板侧已实现，下列条文需用户批准后才能改 `~/.claude/agents/leader.md`。
+> 不改也能工作：面板默认 `-report-grace 5m`，只在 leader 自己的 cron 迟到 5 分钟以上时补发，作为兜底。
+
+**A1【修改】会话启动第 3 步（cron）**——让面板成为唯一的定时来源，修掉 cron 7 天过期、`--continue` 后丢失，也让 Codex leader 能用：
+
+```markdown
+3. 执行 `curl -fsS http://127.0.0.1:7788/healthz`。若 `report_scheduler.enabled` 为 true，且 `report_scheduler.projects`
+   不存在或包含 `<project>`，说明面板会给本项目定时投递【定期汇报】：不要创建定期汇报 cron，CronList 里已有的用 CronDelete 删掉。
+   否则（面板不可达、未开启或本项目不在范围内）：Claude 用 CronList 检查，没有就用 CronCreate 创建（cron `*/10 * * * *`，
+   prompt `【定期汇报】`，recurring）；Codex 没有会话内定时，在对话里提醒用户一次“本项目没有定时汇报”。
+   面板可用时再看 overview 中本项目的 `leader.report` 非 null（白名单拼错、协议版本不符时它为 null），否则同样按“不在范围内”处理。
+   面板之后停机或关闭调度时不会自动重建 cron：leader 会在面板显示离线，由用户重启面板或在对话里唤醒 leader（leader 重启时会重新执行本步）。
+```
+
+批准后面板改用 `-report-grace 0s`（与本条同时上线），汇报节奏回到每 10 分钟。
+
+**A2【替换】会话启动第 4 步（自我识别与命名）**——“标题为 leader 的 claude agent”对 Codex 不成立；会话恢复后名字会丢：
+
+```markdown
+4. 给自己在 herdr 中命名：当前 pane 是 `$HERDR_PANE_ID`。先 `herdr agent get "$HERDR_PANE_ID"` 确认 cwd 是当前项目目录、
+   agent 是自己的 CLI；变量为空、get 失败或不符时停止注册并告诉用户，不要退回“找同目录的某个 agent”。
+   名字优先沿用 leader.json 的 `leader.herdr_name`；没有再按下方“leader 命名”计算。当前名字不同就执行
+   `herdr agent rename "$HERDR_PANE_ID" <名字>`；该名字正被其他 pane 占用时不要覆盖，告诉用户。
+```
+
+**A3【修改】会话启动第 5 步（leader.json）**——面板按 kind 核验，写错 kind 会显示 `agent_kind_mismatch` 且不投递：
+
+```markdown
+5. 写 leader.json（整文件替换，leader 对象整体重写，不保留上一任的字段）：…… leader={agent:<实际 CLI：claude 或 codex>,
+   herdr_name, pane_id, session_id（仅当 herdr 返回了 agent_session.value 才写）}……
+```
+
+说明：没有 session_id 时，面板只按名字识别 leader，名字丢失后不会按 pane 兜底（同 pane 的替换进程无法区分），
+也就无法再给它投定期汇报——A4 的名字核对只能防患于未然，丢名之后的恢复要靠用户（手动 rename 或在对话里唤醒 leader），
+见 [leader-switch.md 1.6](leader-switch.md)。
+
+**A4【修改】定期汇报第 1 步**——名字丢失的兜底（roadmap P2 协议侧）：
+
+```markdown
+1. 先确认自己仍是 leader.json 登记的 leader（leader.agent 与自己的 CLI 一致、pane_id 是 `$HERDR_PANE_ID`；有 session_id 时与自己的一致）。
+   不一致说明已有新 leader 接管，不要刷新心跳、不要改名，在对话里告诉用户后停止处理本次汇报。
+   一致则刷新 leader.json 的 heartbeat_at，并确认自己在 herdr 中的名字等于 leader.json 的 herdr_name，不等就 rename。
+```
+
+并注明：`【定期汇报】project=<project> source=leader-console` 与 cron 发来的 `【定期汇报】` 处理方式完全相同。
+
+**A5【新增】会话启动第 0 步（接管识别与核对）**——切换 CLI 或换会话后，新 leader 必须恢复上一任没做完的决策，而不是只拾取 open 决策：
+
+```markdown
+0. 以下任一情况视为接管上一任 leader：leader.json 已存在，且其中的 leader.agent / pane_id / session_id 与自己不同；
+   或收到【leader 接管】提示（Codex→Codex 在同一 pane 时前后都没有 session，leader.json 看不出换了人，只能靠这条提示）。
+   接管时：
+   - 先追加事件 `{"type":"other","summary":"leader 接管：<旧 agent>→<新 agent>"}`；
+   - 以 state.json 为准，不重新派发仍在运行的 worker；复用 worker 时沿用其 herdr 名字和报告目录；
+   - 上一任挂的后台监听、cron 都随旧会话消失，按第 2、3 步重建（Codex 不挂后台监听，见适配层）；
+   - 第 6 步之前完成“接管核对”：按 decision_id 折叠 decisions.jsonl，结合 answers.jsonl、events.jsonl 扫描三类决策：
+     ① 最新状态仍为 open 且 answers.jsonl 有回答（不论是否已投递）：按“决策回传”第 1–5 步处理；
+     ② 已是 answered（via=panel）但没有该 answer_id 的 decision_executing，包括已写 answered、还没写 decision_ack 的窗口（补写 decision_ack）：
+        先按 decision_id / answer_id 核对现场（worker 状态与报告、git 分支/MR、外部系统），确认后续动作没做过再执行；
+     ③ 有 decision_executing、没有 decision_done：核对现场判断做到哪一步；已完成的补写 decision_done；剩余步骤可逆且明确的续办；
+        涉及提交、推送、发布、对外消息等不可逆动作、又无法确认是否已做的，新建一条决策请用户决定，**不要直接重做**。
+```
+
+**A6【新增】适配层拆分**——把 leader.md 中依赖 Claude Code 的条目（CronCreate、后台 wait 唤醒、PushNotification、`--continue`、
+`--permission-mode auto`、自我识别）集中到一节“适配层：Claude”；核心协议只描述“需要什么能力和完成证据”。
+核心协议应有**唯一来源**（例如单独一个 `leader-core.md`，Claude 的 agent 文件与 Codex profile 都由它生成或引用），避免两份正文漂移。
+Codex 版本见 [leader-switch.md 附录](leader-switch.md)，其中覆盖了活跃任务轮询（working/reviewing/blocked/needs_user）、blocked 去重、面板不可用时的行为。
+
+**A7【建议】Claude leader 启动命令固定带 `--permission-mode auto`**：auto 模式不随重启保留（交叉评审已核实）。它只是权限选择，不能替代 A5 的现场核对。

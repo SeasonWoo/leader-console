@@ -145,6 +145,9 @@ func TestCacheHitAndInvalidation(t *testing.T) {
 		if name == "ledger.md" {
 			put(t, path, "# unused")
 		}
+		if name == "panel.jsonl" {
+			put(t, path, "")
+		}
 		stamp(t, path, int64(100+i))
 		next := load(t, f, "demo")
 		if next == old || next.Version == old.Version {
@@ -473,5 +476,194 @@ func TestAppendCreatesAnswerFiles(t *testing.T) {
 	var got model.AnswerLine
 	if err := json.Unmarshal(b, &got); err != nil || got.AnswerID != line.AnswerID || len(b) == 0 || b[len(b)-1] != '\n' {
 		t.Fatalf("bad answer %s %v", b, err)
+	}
+}
+
+func TestPanelLinesAppendAndFold(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	before := load(t, f, "demo")
+	if len(before.Panel.Reports) != 0 || len(before.Panel.Leaders) != 0 {
+		t.Fatalf("fixture has panel lines: %+v", before.Panel)
+	}
+	at := time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC)
+	for i := 0; i < model.PanelKeep+3; i++ {
+		if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, At: at.Add(time.Duration(i) * time.Minute), Delivery: model.DeliveryDelivered, Target: "leader-demo"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := at
+	if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelLeader, At: at, Leader: &model.LeaderAgent{Agent: "codex", HerdrName: "leader-demo"}, StartedAt: &started}); err != nil {
+		t.Fatal(err)
+	}
+	f2, _ := NewFS(root, FSOptions{}) // a fresh reader (panel restart) sees the same history
+	for _, fs := range []*FS{f, f2} {
+		pd := load(t, fs, "demo")
+		if pd.Version == before.Version || len(pd.Panel.Reports) != model.PanelKeep || !pd.Panel.Reports[model.PanelKeep-1].At.Equal(at.Add(time.Duration(model.PanelKeep+2)*time.Minute)) {
+			t.Fatalf("reports = %+v", pd.Panel.Reports)
+		}
+		if len(pd.Panel.Leaders) != 1 || pd.Panel.Leaders[0].Leader.Agent != "codex" || len(pd.Warnings) != 0 {
+			t.Fatalf("leaders = %+v warnings=%v", pd.Panel.Leaders, pd.Warnings)
+		}
+		if len(pd.Answers) != len(before.Answers) {
+			t.Fatal("panel lines leaked into answers")
+		}
+	}
+	put(t, filepath.Join(root, "demo", "panel.jsonl"), `{"type":"report","at":"2026-10-21T08:00:00Z","delivery":"bogus"}
+{"type":"leader","at":"2026-10-21T08:00:00Z"}
+{"type":"other","at":"2026-10-21T08:00:00Z"}
+`)
+	if pd := load(t, f, "demo"); len(pd.Warnings) != 3 || len(pd.Panel.Reports)+len(pd.Panel.Leaders) != 0 {
+		t.Fatalf("invalid panel lines: %v %+v", pd.Warnings, pd.Panel)
+	}
+	if err := f.AppendPanel(bg, "absent", model.PanelLine{}); !errors.Is(err, ErrProjectNotFound) {
+		t.Fatal(err)
+	}
+}
+
+// A crash mid-append left half a line; the next AppendPanel must still be readable.
+func TestAppendPanelAfterPartialTail(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	path := filepath.Join(root, "demo", "panel.jsonl")
+	put(t, path, `{"type":"leader","at":"2026-10-21T08:00:00Z","leader":{"agent":"claude"}}`+"\n"+`{"type":"report","at":`)
+	if pd := load(t, f, "demo"); len(pd.Panel.Leaders) != 1 || len(pd.Warnings) != 0 {
+		t.Fatalf("partial tail not ignored on read: %+v %v", pd.Panel, pd.Warnings)
+	}
+	at := time.Date(2026, 10, 21, 8, 10, 0, 0, time.UTC)
+	if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, At: at, Delivery: model.DeliveryDelivered, Target: "leader-demo"}); err != nil {
+		t.Fatal(err)
+	}
+	pd := load(t, f, "demo")
+	if len(pd.Panel.Reports) != 1 || !pd.Panel.Reports[0].At.Equal(at) || len(pd.Panel.Leaders) != 1 || len(pd.Warnings) != 0 {
+		t.Fatalf("append after partial tail lost: %+v %v", pd.Panel, pd.Warnings)
+	}
+}
+
+// Another process holding panel.jsonl.lock bounds the append and blocks no reads.
+func TestAppendPanelLockWaitIsBounded(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	lock, err := os.OpenFile(filepath.Join(root, "demo", "panel.jsonl.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(bg)
+	done := make(chan error, 1)
+	go func() {
+		done <- f.AppendPanel(ctx, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	}()
+	time.Sleep(30 * time.Millisecond)
+	read := make(chan struct{})
+	go func() { load(t, f, "demo"); load(t, f, "legacy-demo"); close(read) }()
+	select {
+	case <-read:
+	case <-time.After(time.Second):
+		t.Fatal("reads blocked behind a contended append")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("append ignored cancellation")
+	}
+	start := time.Now()
+	if err := f.AppendPanel(bg, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered}); !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > appendLockTimeout+time.Second {
+		t.Fatalf("append not bounded: %v after %v", err, time.Since(start))
+	}
+}
+
+// Review 2 N2: a second writer of the same file queued behind the first must honour
+// its own deadline/cancellation, and the deadline covers the whole wait.
+func TestAppendQueueBehindSameFileIsCancellable(t *testing.T) {
+	f, root := fixture(t, FSOptions{})
+	lock, err := os.OpenFile(filepath.Join(root, "demo", "panel.jsonl.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	firstCtx, cancelFirst := context.WithCancel(bg)
+	defer cancelFirst()
+	first := make(chan error, 1)
+	go func() {
+		first <- f.AppendPanel(firstCtx, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	}()
+	time.Sleep(30 * time.Millisecond) // the first writer now holds the in-process slot
+
+	ctx, cancel := context.WithTimeout(bg, 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = f.AppendPanel(ctx, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 500*time.Millisecond {
+		t.Fatalf("queued writer: %v after %v", err, time.Since(start))
+	}
+	cancelled, stop := context.WithCancel(bg)
+	second := make(chan error, 1)
+	go func() {
+		second <- f.AppendPanel(cancelled, "demo", model.PanelLine{Type: model.PanelReport, Delivery: model.DeliveryDelivered})
+	}()
+	time.Sleep(20 * time.Millisecond)
+	stop()
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("queued writer ignored cancellation")
+	}
+	select {
+	case <-first:
+		t.Fatal("first writer finished while the flock is held")
+	default:
+	}
+	// Releasing the cross-process lock lets the first writer through.
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if pd := load(t, f, "demo"); len(pd.Panel.Reports) != 1 {
+		t.Fatalf("reports = %+v", pd.Panel.Reports)
+	}
+}
+
+// Two FS instances (two panels, or panel restarts racing) append answers to a file
+// whose lock does not exist yet; nothing may be lost.
+func TestAppendAnswerTwoInstancesFirstCreate(t *testing.T) {
+	for round := 0; round < 5; round++ {
+		f1, root := fixture(t, FSOptions{})
+		f2, _ := NewFS(root, FSOptions{})
+		remove(t, filepath.Join(root, "demo", "answers.jsonl"))
+		var wg sync.WaitGroup
+		errs := make(chan error, 40)
+		for i := 0; i < 20; i++ {
+			for j, fs := range []*FS{f1, f2} {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					id := fmt.Sprintf("a-%d-%d", j, i)
+					errs <- fs.AppendAnswer(bg, "demo", model.AnswerLine{Type: model.LineAnswer, AnswerID: id, DecisionID: "d", Option: "A", At: time.Now()})
+				}()
+			}
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+		}
+		if pd := load(t, f1, "demo"); len(pd.Answers) != 40 || len(pd.Warnings) != 0 {
+			t.Fatalf("round %d: answers=%d warnings=%v", round, len(pd.Answers), pd.Warnings)
+		}
 	}
 }

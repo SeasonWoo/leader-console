@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -40,6 +41,8 @@ type Options struct {
 	QueueInterval time.Duration
 	// LockPath defaults to $XDG_STATE_HOME/leader-console/instance.lock.
 	LockPath string
+	// Reports configures the panel-side 【定期汇报】 scheduler (reports.go).
+	Reports ReportOptions
 }
 
 type snapshot struct {
@@ -61,12 +64,18 @@ type Service struct {
 	agents     []herdr.Agent
 	health     model.HerdrHealth
 	due        map[string]time.Time
-	wake       chan struct{}
-	subMu      sync.Mutex
-	subs       map[chan string]struct{}
-	terminalMu sync.Mutex
-	terminals  map[string]terminalEntry
-	running    atomic.Bool
+	started    time.Time
+	reportWait map[string]string // project → why a due report is waiting (in-memory only)
+	// reportAudit holds report result lines whose panel.jsonl append failed; while
+	// non-empty the project only retries the audit and never prompts.
+	reportAudit map[string][]model.PanelLine
+	reportError map[string]string // project → last panel.jsonl write error
+	wake        chan struct{}
+	subMu       sync.Mutex
+	subs        map[chan string]struct{}
+	terminalMu  sync.Mutex
+	terminals   map[string]terminalEntry
+	running     atomic.Bool
 }
 
 // Error is an HTTP-independent application error. Current accompanies conflicts.
@@ -121,7 +130,9 @@ func New(deps Deps, opts Options) *Service {
 	if opts.QueueInterval <= 0 {
 		opts.QueueInterval = 250 * time.Millisecond
 	}
-	s := &Service{deps: deps, opts: opts, projects: map[string]*model.ProjectData{}, due: map[string]time.Time{}, wake: make(chan struct{}, 1), subs: map[chan string]struct{}{}, terminals: map[string]terminalEntry{}}
+	opts.Reports.Grace = max(opts.Reports.Grace, 0)
+	opts.Reports.StartupDelay = max(opts.Reports.StartupDelay, 0)
+	s := &Service{deps: deps, opts: opts, projects: map[string]*model.ProjectData{}, due: map[string]time.Time{}, started: deps.Now(), reportWait: map[string]string{}, reportAudit: map[string][]model.PanelLine{}, reportError: map[string]string{}, wake: make(chan struct{}, 1), subs: map[chan string]struct{}{}, terminals: map[string]terminalEntry{}}
 	s.publishLocked()
 	return s
 }
@@ -141,6 +152,9 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 	defer lock.Close() // closing releases flock; never unlink the inode
+	s.mu.Lock()
+	s.started = s.deps.Now()
+	s.mu.Unlock()
 	s.refreshHerdr(ctx)
 	if err := s.scan(ctx); err != nil {
 		return err
@@ -160,6 +174,7 @@ func (s *Service) Run(ctx context.Context) error {
 				s.deliver(workerCtx)
 			case <-ticker.C:
 				s.deliver(workerCtx)
+				s.reports(workerCtx)
 			}
 		}
 	}()
@@ -234,13 +249,24 @@ func (s *Service) refreshHerdr(ctx context.Context) {
 // scan always calls the Store port rather than consulting the HTTP snapshot.
 // The FS implementation checks source fingerprints on every LoadProject call.
 func (s *Service) scan(ctx context.Context) error {
+	observe, err := s.scanProjects(ctx)
+	if err != nil {
+		return err
+	}
+	// panel.jsonl appends wait on a cross-process lock; never hold s.mu for them.
+	s.observeLeaders(ctx, observe)
+	return nil
+}
+
+func (s *Service) scanProjects(ctx context.Context) (map[string]model.PanelLine, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	names, err := s.deps.Store.ListProjects(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	next := make(map[string]*model.ProjectData, len(names))
+	observe := map[string]model.PanelLine{}
 	for _, name := range names {
 		pd, err := s.deps.Store.LoadProject(ctx, name)
 		if err != nil {
@@ -252,10 +278,13 @@ func (s *Service) scan(ctx context.Context) error {
 			continue
 		}
 		next[name] = clone(pd)
+		if line, ok := s.leaderObservation(next[name]); ok {
+			observe[name] = line
+		}
 	}
 	s.projects = next
 	s.publishLocked()
-	return nil
+	return observe, nil
 }
 func (s *Service) scanWarning(err error) {
 	s.mu.Lock()
@@ -311,7 +340,7 @@ func (s *Service) Subscribe() (<-chan string, func()) {
 func (s *Service) publishLocked() {
 	now := s.deps.Now()
 	out := &snapshot{projects: make(map[string]*model.ProjectData, len(s.projects)), tasks: []model.TaskView{}, decisions: []model.DecisionView{}}
-	out.overview = model.Overview{GeneratedAt: now, Projects: []model.ProjectSummary{}, Decisions: []model.DecisionView{}, LegacyHints: []model.LegacyHintView{}, Herdr: s.health}
+	out.overview = model.Overview{GeneratedAt: now, Projects: []model.ProjectSummary{}, Decisions: []model.DecisionView{}, LegacyHints: []model.LegacyHintView{}, Herdr: s.health, ReportScheduler: s.ReportScheduler()}
 	names := make([]string, 0, len(s.projects))
 	for name := range s.projects {
 		names = append(names, name)
@@ -321,6 +350,16 @@ func (s *Service) publishLocked() {
 		pd := s.projects[name]
 		out.projects[name] = pd
 		leader, live := s.deps.Reconcile(clone(pd), append([]herdr.Agent(nil), s.agents...), s.health.OK, now)
+		leader.Change = leaderChange(pd)
+		if plan, ok := s.reportPlan(pd); ok {
+			if w := s.reportWait[name]; !now.Before(plan.NextDueAt) || strings.HasPrefix(w, "audit_") {
+				plan.Waiting = w
+			}
+			if e := s.reportError[name]; e != "" {
+				plan.LastError = e
+			}
+			leader.Report = &plan
+		}
 		summary := model.ProjectSummary{Name: name, Source: pd.Source, Leader: leader, TaskCounts: map[string]int{"in_progress": 0, "blocked": 0, "reviewing": 0, "to_merge": 0, "done": 0}, Warnings: append([]string(nil), pd.Warnings...)}
 		if pd.Leader != nil {
 			summary.Title = pd.Leader.Title

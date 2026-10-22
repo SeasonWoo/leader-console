@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -23,7 +24,18 @@ type Config struct {
 	ScanInterval time.Duration
 	// HerdrInterval 是刷新 `herdr agent list` 的间隔。
 	HerdrInterval time.Duration
+	// Reports 为 false 时面板不定时投递【定期汇报】。
+	Reports bool
+	// ReportProjects 限定定时投递的项目；空表示所有 lc-1 项目。
+	ReportProjects []string
+	// ReportGrace 是到期后额外等待的时间，让 leader 自己的 CronCreate 优先；leader 不再自建 cron 后可设 0。
+	ReportGrace time.Duration
+	// ReportStartupDelay 是面板启动后首次投递前的最短等待，避免重启即投递。
+	ReportStartupDelay time.Duration
 }
+
+// projectRE 与 store 的项目目录名规则一致。
+var projectRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // Load 从 args（不含程序名）和环境变量解析配置。
 func Load(args []string) (Config, error) {
@@ -34,6 +46,9 @@ func Load(args []string) (Config, error) {
 	herdrCmd := fs.String("herdr-cmd", envOr("LC_HERDR_CMD", "herdr"), "herdr command prefix, split on spaces")
 	scan := fs.Duration("scan-interval", 2*time.Second, "leader root scan interval")
 	herdrIv := fs.Duration("herdr-interval", 5*time.Second, "herdr agent list refresh interval")
+	reports := fs.String("leader-reports", envOr("LC_LEADER_REPORTS", "all"), "periodic 【定期汇报】 to idle, verified leaders: all | off | comma-separated projects")
+	grace := fs.Duration("report-grace", 5*time.Minute, "extra wait after a report is due, so a leader's own cron keeps priority (0 once it relies on the panel)")
+	startup := fs.Duration("report-startup-delay", time.Minute, "minimum wait after startup before the first report")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -43,6 +58,28 @@ func Load(args []string) (Config, error) {
 		HerdrCmd:      strings.Fields(*herdrCmd),
 		ScanInterval:  *scan,
 		HerdrInterval: *herdrIv,
+		ReportGrace:   *grace,
+
+		ReportStartupDelay: *startup,
+	}
+	switch v := strings.TrimSpace(*reports); v {
+	case "all", "on":
+		cfg.Reports = true
+	case "off":
+	default:
+		// An explicit project list that parses to nothing must not widen to "all".
+		cfg.Reports = true
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				if !projectRE.MatchString(p) {
+					return Config{}, fmt.Errorf("leader-reports: invalid project name %q", p)
+				}
+				cfg.ReportProjects = append(cfg.ReportProjects, p)
+			}
+		}
+		if len(cfg.ReportProjects) == 0 {
+			return Config{}, fmt.Errorf("leader-reports: %q names no project (use all, off or a comma-separated list)", v)
+		}
 	}
 	return cfg, cfg.Validate()
 }
@@ -61,6 +98,9 @@ func (c Config) Validate() error {
 	}
 	if len(c.HerdrCmd) == 0 {
 		return fmt.Errorf("herdr command is empty")
+	}
+	if c.ReportGrace < 0 || c.ReportStartupDelay < 0 {
+		return fmt.Errorf("report-grace and report-startup-delay must not be negative")
 	}
 	return nil
 }

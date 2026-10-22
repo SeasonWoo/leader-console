@@ -14,3 +14,6 @@ coverage.*
 .idea/
 .vscode/
 *.swp
+
+# make run-fixture 运行时由面板写入
+/testdata/fixtures/**/panel.jsonl*

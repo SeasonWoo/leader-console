@@ -25,6 +25,11 @@ type fakeStore struct {
 	projects                               map[string]*model.ProjectData
 	lines                                  []model.AnswerLine
 	listErr, loadErr, appendErr, reportErr error
+	panelErr                               error
+	panelFail                              func(model.PanelLine) error
+	panelHook                              func(model.PanelLine)       // runs before the append, without f.mu (simulates a slow lock wait)
+	panelPostErr                           func(model.PanelLine) error // runs after the line landed (write ok, fsync failed)
+	panel                                  []model.PanelLine
 	report                                 []byte
 	refs                                   []model.ReportRef
 }
@@ -87,6 +92,47 @@ func (f *fakeStore) AppendAnswer(_ context.Context, p string, l model.AnswerLine
 	}
 	pd.Version = fmt.Sprint(len(f.lines))
 	return nil
+}
+func (f *fakeStore) AppendPanel(_ context.Context, p string, l model.PanelLine) error {
+	if f.panelHook != nil {
+		f.panelHook(l)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.panelErr != nil {
+		return f.panelErr
+	}
+	if f.panelFail != nil {
+		if err := f.panelFail(l); err != nil {
+			return err
+		}
+	}
+	pd := f.projects[p]
+	if pd == nil {
+		return store.ErrProjectNotFound
+	}
+	f.panel = append(f.panel, l)
+	if l.Type == model.PanelReport {
+		pd.Panel.Reports = append(pd.Panel.Reports, l)
+	} else {
+		pd.Panel.Leaders = append(pd.Panel.Leaders, l)
+	}
+	pd.Version = fmt.Sprint("p", len(f.panel))
+	if f.panelPostErr != nil {
+		return f.panelPostErr(l)
+	}
+	return nil
+}
+func (f *fakeStore) panelLines(kind model.PanelLineType) []model.PanelLine {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []model.PanelLine
+	for _, l := range f.panel {
+		if l.Type == kind {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 func (f *fakeStore) edit(fn func(*model.ProjectData)) {
 	f.mu.Lock()
@@ -534,8 +580,12 @@ func TestPromptCleaningAndIdentity(t *testing.T) {
 		t.Fatalf("clean=%q", got)
 	}
 	li := &model.LeaderInfo{Cwd: "/x", Leader: model.LeaderAgent{PaneID: "w1:p1", SessionID: "s"}}
-	if !identityMatches(li, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) || identityMatches(li, "other", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) {
-		t.Fatal("pane/codex identity")
+	if !identityMatches(li, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1", SessionID: "s"}) || identityMatches(li, "other", herdr.Agent{Cwd: "/x", PaneID: "w1:p1", SessionID: "s"}) {
+		t.Fatal("pane identity")
+	}
+	// Pane targets need a verifiable session (review R1).
+	if identityMatches(li, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) || identityMatches(&model.LeaderInfo{Cwd: "/x", Leader: model.LeaderAgent{PaneID: "w1:p1"}}, "w1:p1", herdr.Agent{Cwd: "/x", PaneID: "w1:p1"}) {
+		t.Fatal("sessionless pane identity")
 	}
 	longAnswer := strings.Repeat("a", 128)
 	longPrompt := promptText(strings.Repeat("p", 128), model.Decision{ID: strings.Repeat("d", 128)}, model.Answer{AnswerID: longAnswer})

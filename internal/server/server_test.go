@@ -51,6 +51,7 @@ func (f *apiStore) ListReports(context.Context, string, string) ([]model.ReportR
 func (f *apiStore) ReadReport(context.Context, string, string, string) ([]byte, error) {
 	return []byte("report secret-value"), nil
 }
+func (f *apiStore) AppendPanel(context.Context, string, model.PanelLine) error { return nil }
 func (f *apiStore) AppendAnswer(_ context.Context, p string, l model.AnswerLine) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -112,7 +113,7 @@ func eventually(t *testing.T, p func() bool) {
 func apiFixture(t *testing.T) (*service.Service, *apiStore, *apiHerdr, http.Handler, string) {
 	t.Helper()
 	now := time.Now()
-	f := &apiStore{pd: model.ProjectData{Name: "demo", Source: model.SourceState, Version: "1", Leader: &model.LeaderInfo{Cwd: "/demo", Leader: model.LeaderAgent{Agent: "claude", HerdrName: "leader-demo"}, HeartbeatAt: now}, Tasks: []model.Task{{ID: "task", Name: "task", Status: model.TaskWorking, AgentName: "worker", Goal: "goal secret-value", CreatedAt: now}}, Decisions: []model.Decision{{ID: "d1", TaskID: "task", Question: "question", Status: model.DecisionOpen, Options: []model.Option{{Key: "A", Label: "Go"}}, AllowFreeText: true, CreatedAt: now, UpdatedAt: now}}}}
+	f := &apiStore{pd: model.ProjectData{Name: "demo", Source: model.SourceState, Version: "1", Leader: &model.LeaderInfo{ProtocolVersion: "lc-1", Cwd: "/demo", Leader: model.LeaderAgent{Agent: "claude", HerdrName: "leader-demo"}, HeartbeatAt: now}, Tasks: []model.Task{{ID: "task", Name: "task", Status: model.TaskWorking, AgentName: "worker", Goal: "goal secret-value", CreatedAt: now}}, Decisions: []model.Decision{{ID: "d1", TaskID: "task", Question: "question", Status: model.DecisionOpen, Options: []model.Option{{Key: "A", Label: "Go"}}, AllowFreeText: true, CreatedAt: now, UpdatedAt: now}}}}
 	h := &apiHerdr{}
 	svc := service.New(service.Deps{Store: f, Herdr: h, Reconcile: func(*model.ProjectData, []herdr.Agent, bool, time.Time) (model.LeaderPresence, map[string]model.TaskLive) {
 		return model.LeaderPresence{Online: true, Reason: "ok", Target: "leader-demo"}, map[string]model.TaskLive{"task": {AgentFound: true, AgentStatus: "working"}}
@@ -196,7 +197,7 @@ func TestRoutesAndSafeReadViews(t *testing.T) {
 	r := perform(h, "GET", "/healthz", "", nil)
 	var health map[string]any
 	_ = json.Unmarshal(r.Body.Bytes(), &health)
-	if health["status"] != "ok" || health["version"] != Version {
+	if sched, _ := health["report_scheduler"].(map[string]any); health["status"] != "ok" || health["version"] != Version || sched == nil || sched["enabled"] != false {
 		t.Fatal(health)
 	}
 	for _, host := range []string{"localhost:7788", "[::1]:7788"} {

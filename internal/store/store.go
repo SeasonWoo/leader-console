@@ -1,4 +1,5 @@
-// Package store 读取 ~/.leader/*/ 下的项目数据，并负责面板唯一的写操作：向 answers.jsonl 追加。
+// Package store 读取 ~/.leader/*/ 下的项目数据，并负责面板仅有的两类写操作：
+// 向 answers.jsonl（用户回答与投递结果）和 panel.jsonl（面板自身的定时汇报与 leader 身份观察）追加。
 //
 // 负责任务：A（数据读取与解析层）。骨架阶段只定义接口，实现见 docs/tasks.md 任务 A。
 package store
@@ -23,6 +24,8 @@ type Store interface {
 	ReadReport(ctx context.Context, project, taskID, reportID string) ([]byte, error)
 	// AppendAnswer 以“文件锁 + O_APPEND + 单次 write”向 answers.jsonl 追加一行。
 	AppendAnswer(ctx context.Context, project string, line model.AnswerLine) error
+	// AppendPanel 以同样方式向面板自用的 panel.jsonl 追加一行（leader 不读不写该文件）。
+	AppendPanel(ctx context.Context, project string, line model.PanelLine) error
 }
 
 var (
